@@ -17,6 +17,17 @@ import sys
 import os
 from pathlib import Path
 
+# Fix Windows encoding issues
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except AttributeError:
+        # Python < 3.7
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -41,20 +52,20 @@ logger.add(
 def print_banner():
     """バナーを表示"""
     banner = """
-╔═══════════════════════════════════════════════════════════════╗
-║                                                               ║
-║     🏆 ULTIMATE AI TRADING SYSTEM 🏆                         ║
-║         世界最強AIトレーディングシステム                        ║
-║                                                               ║
-║     Components:                                               ║
-║     ├─ PatchTST / Mamba / iTransformer                       ║
-║     ├─ PPO / SAC / C51 / QR-DQN                              ║
-║     ├─ DreamerV3 World Model                                 ║
-║     ├─ Vector DB Pattern Matching                            ║
-║     ├─ Multi-Agent System                                    ║
-║     └─ 500+ Dimension Feature Engineering                    ║
-║                                                               ║
-╚═══════════════════════════════════════════════════════════════╝
++===============================================================+
+|                                                               |
+|     ULTIMATE AI TRADING SYSTEM                                |
+|     World's Strongest AI Trading System                       |
+|                                                               |
+|     Components:                                               |
+|     +-- PatchTST / Mamba / iTransformer                       |
+|     +-- PPO / SAC / C51 / QR-DQN                              |
+|     +-- DreamerV3 World Model                                 |
+|     +-- Vector DB Pattern Matching                            |
+|     +-- Multi-Agent System                                    |
+|     +-- 500+ Dimension Feature Engineering                    |
+|                                                               |
++===============================================================+
 """
     print(banner)
 
