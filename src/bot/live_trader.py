@@ -431,12 +431,17 @@ class LiveTrader:
         logger.info(f"  Confidence: {self.config.trading.min_confidence}-{self.config.trading.max_confidence}")
         logger.info("=" * 50)
 
-        # Setup signal handlers
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            asyncio.get_event_loop().add_signal_handler(
-                sig,
-                lambda: asyncio.create_task(self.stop()),
-            )
+        # Setup signal handlers (Unix only - Windows uses KeyboardInterrupt)
+        if sys.platform != 'win32':
+            try:
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    asyncio.get_event_loop().add_signal_handler(
+                        sig,
+                        lambda: asyncio.create_task(self.stop()),
+                    )
+            except NotImplementedError:
+                # Windows doesn't support add_signal_handler
+                pass
 
         # Connect WebSocket
         if hasattr(self.client, 'connect_websocket'):
