@@ -419,18 +419,30 @@ class AggressiveTrader:
 
                 # ポジション更新
                 position = self.positions[pair]
+                cost = price * size
+
                 if side == OrderSide.BUY:
+                    # 買い: 資本から購入コストを引く
+                    self.current_capital -= cost
                     position.size += size
-                    position.entry_price = price
+                    # 平均取得単価を計算
+                    if position.entry_price > 0:
+                        total_cost = (position.entry_price * (position.size - size)) + cost
+                        position.entry_price = total_cost / position.size
+                    else:
+                        position.entry_price = price
                     position.entry_time = datetime.now()
+                    logger.info(f"  💰 Available: ¥{self.current_capital:,.0f}")
                 else:
-                    # 決済時のPnL計算
-                    if position.size > 0:
+                    # 売り: 売却収入を資本に加算
+                    self.current_capital += cost
+                    # 決済PnL計算
+                    if position.size > 0 and position.entry_price > 0:
                         pnl = (price - position.entry_price) * min(size, position.size)
                         self.total_pnl += pnl
-                        self.current_capital += pnl
                         if pnl > 0:
                             self.winning_trades += 1
+                        logger.info(f"  💵 PnL: ¥{pnl:,.0f}")
                     position.size -= size
                     if position.size <= 0:
                         position.size = 0
