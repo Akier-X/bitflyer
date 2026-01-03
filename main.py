@@ -17,6 +17,10 @@ import sys
 import os
 from pathlib import Path
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 # Fix Windows encoding issues
 if sys.platform == 'win32':
     try:
