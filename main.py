@@ -53,9 +53,27 @@ logger.add(
 )
 
 
-def print_banner(multi_asset: bool = False):
+def print_banner(multi_asset: bool = False, aggressive: bool = False):
     """バナーを表示"""
-    if multi_asset:
+    if aggressive:
+        banner = """
++===============================================================+
+|                                                               |
+|     AGGRESSIVE SMALL ACCOUNT TRADER                           |
+|     5000 yen -> 15000+ yen in 1 Month                         |
+|                                                               |
+|     Strategy:                                                 |
+|     +-- XRP/JPY, MONA/JPY, XLM/JPY (Low Cost)                |
+|     +-- High-Frequency Scalping (0.5s interval)               |
+|     +-- Momentum + Trend Following                            |
+|     +-- Auto Take-Profit (0.8%) / Stop-Loss (0.5%)           |
+|     +-- Compound Gains for Maximum Growth                     |
+|                                                               |
+|     Target: 3x Return (200% profit)                           |
+|                                                               |
++===============================================================+
+"""
+    elif multi_asset:
         banner = """
 +===============================================================+
 |                                                               |
@@ -149,6 +167,53 @@ def run_health_server(port: int = 8080):
 
     logger.info(f"Starting health server on port {port}")
     web.run_app(app, host="0.0.0.0", port=port)
+
+
+async def run_aggressive_trader(paper_trading: bool = True, port: int = 8080, capital: float = 5000):
+    """攻撃的スモールアカウントトレーダーを実行"""
+    from aiohttp import web
+    from config.settings import get_config, reload_config
+    from src.bot.aggressive_trader import AggressiveTrader
+
+    if paper_trading:
+        os.environ["PAPER_TRADING"] = "true"
+        reload_config()
+
+    config = get_config()
+    trader = AggressiveTrader(config, initial_capital=capital)
+
+    # Health check handlers
+    async def health_handler(request):
+        return web.json_response({
+            "status": "healthy",
+            "mode": "aggressive",
+            "capital": trader.current_capital,
+            "pnl": trader.total_pnl,
+        })
+
+    async def status_handler(request):
+        return web.json_response(trader.get_status())
+
+    # Setup web app
+    app = web.Application()
+    app.router.add_get("/health", health_handler)
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/status", status_handler)
+
+    # Start web server in background
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Health server started on port {port}")
+
+    # Run trader
+    try:
+        await trader.start()
+    except KeyboardInterrupt:
+        await trader.stop()
+    finally:
+        await runner.cleanup()
 
 
 async def run_multi_asset_trader(paper_trading: bool = True, port: int = 8080):
@@ -334,6 +399,17 @@ Examples:
         help="Multi-asset trading mode (all pairs)",
     )
     parser.add_argument(
+        "--aggressive",
+        action="store_true",
+        help="Aggressive small account mode (5000yen -> 15000yen)",
+    )
+    parser.add_argument(
+        "--capital",
+        type=float,
+        default=5000,
+        help="Initial capital for aggressive mode (default: 5000)",
+    )
+    parser.add_argument(
         "--pairs",
         type=str,
         default="",
@@ -358,7 +434,7 @@ Examples:
         show_status()
         return
 
-    print_banner(multi_asset=args.multi)
+    print_banner(multi_asset=args.multi, aggressive=args.aggressive)
 
     if args.health_only:
         run_health_server(args.port)
@@ -372,7 +448,21 @@ Examples:
         logger.info("💰 Starting in LIVE TRADING mode")
         logger.warning("⚠️ Real money will be used!")
 
-    if args.multi:
+    if args.aggressive:
+        logger.info(f"🔥 AGGRESSIVE MODE: ¥{args.capital:,.0f} -> ¥{args.capital * 3:,.0f}")
+        logger.info("🎯 Target: 3x return in 1 month")
+        try:
+            asyncio.run(run_aggressive_trader(
+                paper_trading=paper_trading,
+                port=args.port,
+                capital=args.capital,
+            ))
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested")
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            sys.exit(1)
+    elif args.multi:
         logger.info("🌐 MULTI-ASSET MODE: Trading all pairs")
         try:
             asyncio.run(run_multi_asset_trader(
