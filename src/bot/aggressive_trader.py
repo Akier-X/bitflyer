@@ -16,6 +16,8 @@ Key Features:
 
 import asyncio
 import sys
+import json
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -177,6 +179,11 @@ class AggressiveTrader:
 
         # 取引履歴
         self.trade_history: deque = deque(maxlen=500)
+
+        # 状態保存ファイル
+        self.state_file = "logs/trader_state.json"
+        self.last_state_save = datetime.now()
+        self.state_save_interval = 60  # 60秒ごとに保存
 
         logger.info(f"AggressiveTrader initialized")
         logger.info(f"  Initial Capital: ¥{initial_capital:,.0f}")
@@ -457,6 +464,9 @@ class AggressiveTrader:
                     f"(conf={confidence:.2f}, {reason})"
                 )
 
+                # 取引後に状態を保存
+                self._save_state()
+
                 # 通知
                 if self.notifier and self.total_trades % 10 == 0:  # 10回ごと
                     win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
@@ -537,6 +547,11 @@ class AggressiveTrader:
                 if tick % 15 == 0:
                     self._log_status()
 
+                # 定期状態保存（60秒ごと）
+                if (datetime.now() - self.last_state_save).seconds >= self.state_save_interval:
+                    self._save_state()
+                    self.last_state_save = datetime.now()
+
                 # 目標達成チェック
                 if self.current_capital >= self.initial_capital * 3:
                     logger.info(f"🎉 TARGET ACHIEVED! Capital: ¥{self.current_capital:,.0f}")
@@ -559,24 +574,45 @@ class AggressiveTrader:
                     logger.error(f"Loop error: {e}")
                 await asyncio.sleep(3)
 
+    def _calculate_current_portfolio_value(self) -> float:
+        """現在のポートフォリオ価値を計算（現金 + ポジションの時価）"""
+        total = self.current_capital
+
+        for pair, pos in self.positions.items():
+            if pos.size > 0 and pos.current_price > 0:
+                total += pos.size * pos.current_price
+
+        return total
+
     def _log_status(self):
         """ステータスログ"""
         win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
-        roi = ((self.current_capital / self.initial_capital) - 1) * 100
+
+        # 全ポートフォリオ価値を計算
+        portfolio_value = self._calculate_current_portfolio_value()
+        roi = ((portfolio_value / self.initial_capital) - 1) * 100
+
+        # ポジション価値
+        position_value = portfolio_value - self.current_capital
 
         logger.info(
-            f"📊 Capital: ¥{self.current_capital:,.0f} ({roi:+.1f}%) | "
-            f"Trades: {self.total_trades} | "
+            f"📊 Portfolio: ¥{portfolio_value:,.0f} ({roi:+.1f}%) | "
+            f"Cash: ¥{self.current_capital:,.0f} | "
+            f"Crypto: ¥{position_value:,.0f}"
+        )
+        logger.info(
+            f"   Trades: {self.total_trades} | "
             f"Win: {win_rate:.0f}% | "
             f"PnL: ¥{self.total_pnl:,.0f}"
         )
 
-        for pair in self.active_pairs[:3]:
+        for pair in self.active_pairs[:4]:
             pos = self.positions.get(pair)
             if pos and pos.size > 0:
+                value = pos.size * pos.current_price
                 logger.info(
-                    f"  {pair}: {pos.size:.2f} @ ¥{pos.entry_price:,.0f} "
-                    f"({pos.unrealized_pnl_pct:+.2f}%)"
+                    f"  {pair}: {pos.size:.2f} @ ¥{pos.current_price:,.0f} "
+                    f"= ¥{value:,.0f} ({pos.unrealized_pnl_pct:+.2f}%)"
                 )
 
     async def _fetch_balance_from_api(self) -> Tuple[float, Dict[str, float]]:
@@ -613,6 +649,103 @@ class AggressiveTrader:
 
         return jpy_balance, crypto_holdings
 
+    async def _calculate_total_portfolio_value(self, jpy_balance: float, holdings: Dict[str, float]) -> float:
+        """全資産の合計価値（JPY換算）を計算"""
+        total_value = jpy_balance
+
+        currency_to_pair = {
+            'XRP': 'XRP_JPY',
+            'MONA': 'MONA_JPY',
+            'XLM': 'XLM_JPY',
+            'ETH': 'ETH_JPY',
+            'BTC': 'BTC_JPY',
+        }
+
+        for currency, amount in holdings.items():
+            pair = currency_to_pair.get(currency)
+            if pair and pair in self.clients:
+                try:
+                    ticker = await self.clients[pair].get_ticker()
+                    if ticker:
+                        value = amount * ticker.ltp
+                        total_value += value
+                        logger.info(f"  {currency}: {amount:.4f} × ¥{ticker.ltp:,.0f} = ¥{value:,.0f}")
+                except Exception:
+                    pass
+
+        return total_value
+
+    def _save_state(self):
+        """状態をファイルに保存（再起動後も継続可能）"""
+        try:
+            state = {
+                'saved_at': datetime.now().isoformat(),
+                'initial_capital': self.initial_capital,
+                'current_capital': self.current_capital,
+                'max_capital': self.max_capital,
+                'total_trades': self.total_trades,
+                'winning_trades': self.winning_trades,
+                'total_pnl': self.total_pnl,
+                'start_time': self.start_time.isoformat() if self.start_time else None,
+                'positions': {
+                    pair: {
+                        'size': pos.size,
+                        'entry_price': pos.entry_price,
+                        'entry_time': pos.entry_time.isoformat() if pos.entry_time else None,
+                    }
+                    for pair, pos in self.positions.items() if pos.size > 0
+                },
+            }
+
+            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+
+            logger.debug(f"💾 State saved: {len(state['positions'])} positions")
+        except Exception as e:
+            logger.warning(f"Failed to save state: {e}")
+
+    def _load_state(self) -> bool:
+        """保存された状態を読み込み"""
+        try:
+            if not os.path.exists(self.state_file):
+                logger.info("📂 No saved state found, starting fresh")
+                return False
+
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+
+            # 状態が古すぎる場合はスキップ（24時間以上前）
+            saved_at = datetime.fromisoformat(state['saved_at'])
+            age_hours = (datetime.now() - saved_at).total_seconds() / 3600
+            if age_hours > 24:
+                logger.warning(f"⚠️ Saved state is {age_hours:.1f} hours old, ignoring")
+                return False
+
+            # 統計情報を復元
+            self.total_trades = state.get('total_trades', 0)
+            self.winning_trades = state.get('winning_trades', 0)
+            self.total_pnl = state.get('total_pnl', 0.0)
+
+            # ポジションを復元
+            saved_positions = state.get('positions', {})
+            for pair, pos_data in saved_positions.items():
+                if pair in self.positions:
+                    self.positions[pair].size = pos_data.get('size', 0)
+                    self.positions[pair].entry_price = pos_data.get('entry_price', 0)
+                    entry_time = pos_data.get('entry_time')
+                    if entry_time:
+                        self.positions[pair].entry_time = datetime.fromisoformat(entry_time)
+
+            logger.info(f"📥 State loaded from {saved_at.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"   Trades: {self.total_trades}, PnL: ¥{self.total_pnl:,.0f}")
+            logger.info(f"   Positions: {len(saved_positions)}")
+
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load state: {e}")
+            return False
+
     async def _init_positions_from_holdings(self, holdings: Dict[str, float]):
         """既存の保有コインからポジションを初期化"""
         # 通貨コードとペアのマッピング
@@ -647,6 +780,11 @@ class AggressiveTrader:
         self.running = True
         self.start_time = datetime.now()
 
+        # 保存された状態を読み込み
+        state_loaded = self._load_state()
+        if state_loaded:
+            logger.info("📥 Resuming from saved state...")
+
         # APIから残高と保有コインを取得
         if not self.config.trading.paper_trading:
             logger.info("📡 Fetching balance and holdings from bitFlyer API...")
@@ -657,18 +795,34 @@ class AggressiveTrader:
                 await self._init_positions_from_holdings(holdings)
                 logger.info(f"📦 Loaded {len(holdings)} existing positions")
 
-            if self.initial_capital == 0 and api_balance > 0:
-                self.initial_capital = api_balance
-                self.current_capital = api_balance
-                self.max_capital = api_balance
-                # アクティブペアを再選択
-                self.active_pairs = self._select_pairs_for_capital(api_balance)
-                logger.info(f"✅ Balance fetched: ¥{api_balance:,.0f}")
-            else:
-                logger.warning("⚠️ Could not fetch balance, using default 5000")
-                self.initial_capital = 5000
-                self.current_capital = 5000
-                self.max_capital = 5000
+            if self.initial_capital == 0:
+                if api_balance > 0 or holdings:
+                    # 全資産の合計価値を計算（JPY + 保有コインのJPY換算額）
+                    logger.info("📊 Calculating total portfolio value...")
+                    total_portfolio = await self._calculate_total_portfolio_value(api_balance, holdings)
+
+                    self.initial_capital = total_portfolio
+                    self.current_capital = api_balance  # 取引可能な現金のみ
+                    self.max_capital = total_portfolio
+
+                    # 保有コインの価値を記録
+                    crypto_value = total_portfolio - api_balance
+
+                    logger.info("=" * 50)
+                    logger.info("💼 PORTFOLIO SUMMARY")
+                    logger.info("=" * 50)
+                    logger.info(f"  💴 JPY Balance:    ¥{api_balance:,.0f}")
+                    logger.info(f"  🪙 Crypto Value:   ¥{crypto_value:,.0f}")
+                    logger.info(f"  💰 TOTAL VALUE:    ¥{total_portfolio:,.0f}")
+                    logger.info("=" * 50)
+
+                    # アクティブペアを全ポートフォリオ価値で選択
+                    self.active_pairs = self._select_pairs_for_capital(total_portfolio)
+                else:
+                    logger.warning("⚠️ Could not fetch balance, using default 5000")
+                    self.initial_capital = 5000
+                    self.current_capital = 5000
+                    self.max_capital = 5000
 
         # Paper mode default
         if self.initial_capital == 0:
@@ -702,6 +856,10 @@ class AggressiveTrader:
         """トレーダー停止"""
         logger.info("Stopping Aggressive Trader...")
         self.running = False
+
+        # 停止時に状態を保存
+        self._save_state()
+        logger.info("💾 State saved for resume on restart")
 
         # 全ポジション決済
         for pair, position in self.positions.items():
@@ -745,17 +903,25 @@ class AggressiveTrader:
 
     def get_status(self) -> Dict:
         """ステータス取得"""
+        portfolio_value = self._calculate_current_portfolio_value()
+        position_value = portfolio_value - self.current_capital
+
         return {
             'running': self.running,
-            'capital': self.current_capital,
+            'portfolio_value': portfolio_value,
+            'cash': self.current_capital,
+            'crypto_value': position_value,
             'initial': self.initial_capital,
             'pnl': self.total_pnl,
+            'roi_pct': ((portfolio_value / self.initial_capital) - 1) * 100 if self.initial_capital > 0 else 0,
             'trades': self.total_trades,
             'win_rate': (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0,
             'positions': {
                 pair: {
                     'size': pos.size,
                     'entry': pos.entry_price,
+                    'current': pos.current_price,
+                    'value': pos.size * pos.current_price,
                     'pnl_pct': pos.unrealized_pnl_pct,
                 }
                 for pair, pos in self.positions.items() if pos.size > 0
