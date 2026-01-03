@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and data
+logs/
+*.log
+
+# Models (can be large)
+models/*.pt
+models/*.pth
+
+# Test
+tests/
+*.test.py
