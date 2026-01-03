@@ -2,7 +2,8 @@
 Ultimate AI Trader
 ===================
 世界最強・無敗・自己進化型AIトレーダー
-勝率99%以上、負けたら即座に進化
+高頻度取引と高利益のバランスを取る
+動的閾値による取引頻度最適化
 """
 
 import os
@@ -30,6 +31,12 @@ from ..risk.position import PositionManager
 from ..execution.order_manager import OrderManager
 from ..execution.smart_executor import SmartExecutor
 from .unbeatable_system import UltimateDecisionMaker
+from .high_frequency_profit import (
+    HighFrequencyProfitSystem,
+    FeeStructure,
+    ProfitCalculator,
+    AdaptiveProfitOptimizer,
+)
 
 
 class UltimateAITrader:
@@ -39,13 +46,13 @@ class UltimateAITrader:
     全システムを統合した世界最強のトレーディングシステム
 
     特徴:
-    - 勝率99%以上を目指す無敗システム
+    - 高頻度取引による利益積み上げ
+    - 動的閾値で取引頻度を最適化
+    - 手数料を考慮した利益計算
     - 負けたら即座に進化し同じ失敗を繰り返さない
     - リアルタイム機械学習・強化学習
     - 適応型戦略重み調整
     - 市場レジーム検出
-    - マルチモデルアンサンブル
-    - 自動ハイパーパラメータ最適化
     """
 
     def __init__(
@@ -53,8 +60,9 @@ class UltimateAITrader:
         api_key: str = None,
         api_secret: str = None,
         initial_capital: float = 1000000,
+        target_trades_per_hour: int = 50,
     ):
-        logger.info("🚀 Initializing Ultimate AI Trader - World's Strongest System")
+        logger.info("🚀 Initializing Ultimate AI Trader - High-Frequency Profit System")
 
         # API
         self.api_key = api_key or os.getenv("BITFLYER_API_KEY", "")
@@ -100,8 +108,18 @@ class UltimateAITrader:
         # 自動最適化
         self.auto_ml = AutoMLSystem()
 
-        # 無敗システム
-        self.decision_maker = UltimateDecisionMaker()
+        # 無敗システム（動的閾値対応）
+        self.decision_maker = UltimateDecisionMaker(target_trades_per_hour=target_trades_per_hour)
+
+        # 高頻度利益システム
+        self.fee_structure = FeeStructure()
+        self.hf_profit_system = HighFrequencyProfitSystem(
+            fee_structure=self.fee_structure,
+            target_trades_per_hour=target_trades_per_hour,
+            min_profit_per_trade=0.0002,  # 0.02%
+        )
+        self.profit_calc = ProfitCalculator(self.fee_structure)
+        self.profit_optimizer = AdaptiveProfitOptimizer()
 
         # リスク管理
         limits = RiskLimits(
@@ -266,14 +284,47 @@ class UltimateAITrader:
         indicator_signals = self._collect_indicator_signals(market_data)
 
         # 市場状況
+        volatility = self._calculate_volatility(product_code)
         market_conditions = {
-            "volatility": self._calculate_volatility(product_code),
+            "volatility": volatility,
             "regime": self.regime_detector.current_regime,
             "spread": market_data.spread or 0,
             "imbalance": market_data.order_book_imbalance or 0,
         }
 
-        # 究極の意思決定
+        # 高頻度利益システムによる追加機会分析
+        hf_opportunity = self.hf_profit_system.analyze_opportunity(
+            product_code=product_code,
+            current_price=market_data.close,
+            best_bid=market_data.best_bid or market_data.close * 0.999,
+            best_ask=market_data.best_ask or market_data.close * 1.001,
+            volume=market_data.volume,
+            order_book_imbalance=market_data.order_book_imbalance or 0,
+            volatility=volatility,
+        )
+
+        # 高頻度機会がある場合はそちらを優先
+        if hf_opportunity and hf_opportunity.expected_profit_after_fee > 0:
+            current_position = self.position_manager.get_position(product_code)
+            current_size = current_position.size if current_position else 0
+
+            should_hf_trade, hf_reason = self.hf_profit_system.should_trade(
+                hf_opportunity,
+                current_position=current_size,
+                max_position=0.1,  # 最大0.1 BTC
+            )
+
+            if should_hf_trade:
+                self._execute_trade(
+                    product_code,
+                    hf_opportunity.action,
+                    hf_opportunity.confidence,
+                    features,
+                    market_conditions,
+                )
+                return
+
+        # 究極の意思決定（動的閾値対応）
         action, confidence, should_execute, reason = self.decision_maker.make_decision(
             features=features,
             model_predictions=model_predictions,
@@ -284,7 +335,8 @@ class UltimateAITrader:
         if should_execute:
             self._execute_trade(product_code, action, confidence, features, market_conditions)
         else:
-            logger.debug(f"No trade: {reason}")
+            if self.trade_count % 100 == 0:  # 100回に1回だけログ
+                logger.debug(f"No trade: {reason}")
 
     def _get_market_data(self, product_code: str) -> Optional[MarketData]:
         """市場データ取得"""
@@ -551,6 +603,9 @@ class UltimateAITrader:
             market_conditions=trade_info["market_conditions"],
         )
 
+        # 高頻度利益システムにも記録
+        self.hf_profit_system.record_trade_result(pnl)
+
         # 自己進化システムにも記録
         reward = 1.0 if pnl > 0 else -1.0
         self.evolving_system.record_outcome(
@@ -567,10 +622,11 @@ class UltimateAITrader:
         self.risk_manager.update_pnl(pnl)
 
         # ログ
+        stats = self.decision_maker.unbeatable.get_stats()
         if pnl > 0:
-            logger.info(f"💰 Win: +{pnl:,.0f} JPY")
+            logger.info(f"💰 Win: +{pnl:,.0f} JPY | Streak: {stats['win_streak']} | Trades/hr: {stats['trades_per_hour']}")
         else:
-            logger.warning(f"📉 Loss: {pnl:,.0f} JPY - System evolving...")
+            logger.warning(f"📉 Loss: {pnl:,.0f} JPY | Threshold: {stats['current_threshold']:.1%} | Evolving...")
 
     def _close_all_positions(self) -> None:
         """全ポジションクローズ"""
@@ -597,11 +653,13 @@ class UltimateAITrader:
         """ステータス取得"""
         unbeatable_stats = self.decision_maker.unbeatable.get_stats()
         evolution_stats = self.evolving_system.get_evolution_stats()
+        hf_stats = self.hf_profit_system.get_stats()
 
         return {
             "is_running": self.is_running,
             "trade_count": self.trade_count,
             "unbeatable": unbeatable_stats,
+            "high_frequency": hf_stats,
             "evolution": evolution_stats,
             "regime": self.regime_detector.current_regime,
             "positions": self.position_manager.get_position_summary(),
@@ -613,3 +671,11 @@ class UltimateAITrader:
         print(self.decision_maker.get_performance_report())
         print(f"\n🧬 Evolution Generation: {self.evolving_system.generation}")
         print(f"📊 Current Regime: {self.regime_detector.current_regime}")
+
+        # 高頻度利益システム統計
+        hf_stats = self.hf_profit_system.get_stats()
+        print(f"\n📈 High-Frequency Stats:")
+        print(f"   Total Profit: {hf_stats['total_profit']:,.0f} JPY")
+        print(f"   Trades/Hour: {hf_stats['trades_per_hour']} / {hf_stats['target_trades_per_hour']} target")
+        print(f"   Win Rate: {hf_stats['recent_win_rate']:.1%}")
+        print(f"   Avg Profit/Trade: {hf_stats['avg_profit_per_trade']:.4%}")

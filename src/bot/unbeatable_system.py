@@ -3,12 +3,13 @@ Unbeatable Trading System
 ==========================
 勝率99%以上を目指す無敗システム
 負けたら即座に進化し、同じ失敗を二度と繰り返さない
+動的閾値による高頻度取引対応
 """
 
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 import hashlib
 import pickle
@@ -185,29 +186,123 @@ class MultiModelConsensus:
         self.model_confidences.clear()
 
 
-class ConfidenceGate:
+class DynamicConfidenceGate:
     """
-    確信度ゲート
+    動的確信度ゲート
 
-    確信度が極めて高い時のみ取引を許可
+    取引頻度と勝率に応じて閾値を動的に調整
+    高頻度取引と高勝率のバランスを取る
     """
 
     def __init__(
         self,
-        min_confidence: float = 0.95,
-        min_indicators_aligned: int = 5,
+        base_confidence: float = 0.60,
+        min_confidence: float = 0.50,
+        max_confidence: float = 0.85,
+        min_indicators_aligned: int = 3,
+        target_trades_per_hour: int = 50,
     ):
         """
         Args:
+            base_confidence: ベース確信度
             min_confidence: 最低確信度
+            max_confidence: 最大確信度
             min_indicators_aligned: 最低一致インジケータ数
+            target_trades_per_hour: 目標時間当たり取引数
         """
+        self.base_confidence = base_confidence
         self.min_confidence = min_confidence
+        self.max_confidence = max_confidence
         self.min_indicators_aligned = min_indicators_aligned
+        self.target_trades_per_hour = target_trades_per_hour
+
+        # 動的閾値
+        self.current_threshold = base_confidence
 
         # インジケータチェックリスト
         self.indicators: Dict[str, bool] = {}
         self.indicator_confidences: Dict[str, float] = {}
+
+        # 取引履歴
+        self.trade_times: deque = deque(maxlen=1000)
+        self.recent_results: deque = deque(maxlen=100)
+
+        # 連勝/連敗トラッキング
+        self.win_streak = 0
+        self.loss_streak = 0
+
+    def update_threshold(self, volatility: float = 0.02) -> float:
+        """
+        閾値を動的に更新
+
+        Args:
+            volatility: 現在のボラティリティ
+
+        Returns:
+            更新された閾値
+        """
+        threshold = self.base_confidence
+
+        # 取引頻度による調整
+        trades_last_hour = self._count_trades_last_hour()
+
+        if trades_last_hour < self.target_trades_per_hour * 0.5:
+            # 取引少なすぎ → 閾値下げる
+            threshold -= 0.08
+        elif trades_last_hour < self.target_trades_per_hour * 0.8:
+            threshold -= 0.04
+        elif trades_last_hour > self.target_trades_per_hour * 1.5:
+            # 取引多すぎ → 閾値上げる
+            threshold += 0.05
+
+        # 勝率による調整
+        if len(self.recent_results) >= 10:
+            recent_win_rate = sum(1 for r in self.recent_results if r > 0) / len(self.recent_results)
+            if recent_win_rate > 0.75:
+                # 勝率高い → 積極的に
+                threshold -= 0.05
+            elif recent_win_rate > 0.65:
+                threshold -= 0.02
+            elif recent_win_rate < 0.50:
+                # 勝率低い → 慎重に
+                threshold += 0.08
+            elif recent_win_rate < 0.55:
+                threshold += 0.04
+
+        # 連勝/連敗による調整
+        if self.win_streak >= 5:
+            threshold -= 0.03
+        if self.loss_streak >= 2:
+            threshold += 0.10
+
+        # ボラティリティによる調整
+        if volatility > 0.03:
+            # 高ボラ時は利益チャンス大
+            threshold -= 0.05
+        elif volatility < 0.01:
+            # 低ボラ時は厳しめ
+            threshold += 0.03
+
+        # 範囲内に収める
+        self.current_threshold = np.clip(threshold, self.min_confidence, self.max_confidence)
+        return self.current_threshold
+
+    def record_trade(self, profit: float) -> None:
+        """取引結果記録"""
+        self.trade_times.append(datetime.now())
+        self.recent_results.append(profit)
+
+        if profit > 0:
+            self.win_streak += 1
+            self.loss_streak = 0
+        else:
+            self.loss_streak += 1
+            self.win_streak = 0
+
+    def _count_trades_last_hour(self) -> int:
+        """直近1時間の取引数"""
+        cutoff = datetime.now() - timedelta(hours=1)
+        return sum(1 for t in self.trade_times if t > cutoff)
 
     def check_indicator(
         self,
@@ -219,15 +314,23 @@ class ConfidenceGate:
         self.indicators[name] = signal
         self.indicator_confidences[name] = confidence
 
-    def is_gate_open(self) -> Tuple[bool, float, Dict[str, Any]]:
+    def is_gate_open(self, volatility: float = 0.02) -> Tuple[bool, float, Dict[str, Any]]:
         """
         ゲートが開いているか（取引可能か）
+
+        動的閾値を使用して判定
+
+        Args:
+            volatility: 現在のボラティリティ
 
         Returns:
             (is_open, overall_confidence, details)
         """
         if not self.indicators:
             return False, 0.0, {"reason": "No indicators"}
+
+        # 動的閾値更新
+        dynamic_threshold = self.update_threshold(volatility)
 
         # 一致インジケータをカウント
         aligned = sum(1 for v in self.indicators.values() if v)
@@ -248,13 +351,17 @@ class ConfidenceGate:
             "aligned_indicators": aligned,
             "total_indicators": len(self.indicators),
             "overall_confidence": overall_confidence,
+            "dynamic_threshold": dynamic_threshold,
+            "trades_last_hour": self._count_trades_last_hour(),
+            "win_streak": self.win_streak,
+            "loss_streak": self.loss_streak,
             "indicators": self.indicators.copy(),
         }
 
-        # ゲート判定
+        # ゲート判定（動的閾値を使用）
         is_open = (
             aligned >= self.min_indicators_aligned and
-            overall_confidence >= self.min_confidence
+            overall_confidence >= dynamic_threshold
         )
 
         return is_open, overall_confidence, details
@@ -383,23 +490,29 @@ class UnbeatableSystem:
 
     勝率99%以上を目指す究極のシステム
     負けたら即座に進化し、同じ失敗を二度と繰り返さない
+    動的閾値による高頻度取引対応
     """
 
     def __init__(
         self,
         feature_dim: int = 50,
         save_dir: str = "models/unbeatable",
+        target_trades_per_hour: int = 50,
     ):
         self.feature_dim = feature_dim
         self.save_dir = save_dir
+        self.target_trades_per_hour = target_trades_per_hour
         os.makedirs(save_dir, exist_ok=True)
 
         # コンポーネント
         self.loss_memory = LossMemory(similarity_threshold=0.90)
-        self.consensus = MultiModelConsensus(min_agreement=0.85)
-        self.confidence_gate = ConfidenceGate(
-            min_confidence=0.95,
-            min_indicators_aligned=5,
+        self.consensus = MultiModelConsensus(min_agreement=0.70)  # 70%合意で取引
+        self.confidence_gate = DynamicConfidenceGate(
+            base_confidence=0.60,
+            min_confidence=0.50,
+            max_confidence=0.85,
+            min_indicators_aligned=3,
+            target_trades_per_hour=target_trades_per_hour,
         )
         self.evolution = InstantEvolution(evolution_speed=0.3)
 
@@ -417,7 +530,7 @@ class UnbeatableSystem:
         self.is_locked = False  # 連続負け後のロック
         self.lock_until: Optional[datetime] = None
 
-        logger.info("🏆 Unbeatable System initialized - Targeting 99%+ win rate")
+        logger.info("🏆 Unbeatable System initialized - High-frequency profit mode")
 
     def should_trade(
         self,
@@ -466,28 +579,38 @@ class UnbeatableSystem:
         if action == 1:
             return False, 1, agreement, "Consensus is HOLD"
 
-        # 3. インジケータゲート
+        # 3. インジケータゲート（動的閾値を使用）
+        volatility = market_conditions.get('volatility', 0.02)
         self.confidence_gate.clear()
         for indicator_name, (signal, conf) in indicator_signals.items():
             self.confidence_gate.check_indicator(indicator_name, signal, conf)
 
-        gate_open, gate_confidence, gate_details = self.confidence_gate.is_gate_open()
+        gate_open, gate_confidence, gate_details = self.confidence_gate.is_gate_open(volatility)
 
         if not gate_open:
-            return False, 1, 0.0, f"Confidence gate closed ({gate_details['aligned_indicators']}/{gate_details['total_indicators']})"
+            return False, 1, 0.0, f"Gate closed (conf: {gate_confidence:.2%}, threshold: {gate_details.get('dynamic_threshold', 0):.2%})"
 
-        # 4. 進化による閾値調整
-        adjusted_threshold = self.evolution.get_adjusted_confidence_threshold(0.95)
+        # 4. 最終確信度計算
         final_confidence = min(agreement, gate_confidence)
 
-        if final_confidence < adjusted_threshold:
-            return False, 1, final_confidence, f"Below adjusted threshold ({adjusted_threshold:.2%})"
+        # 動的閾値との比較（ゲートが開いていれば基本的にOK）
+        dynamic_threshold = gate_details.get('dynamic_threshold', 0.60)
 
-        # 5. 最終チェック - 極めて高い確信度のみ許可
-        if final_confidence < 0.90:
-            return False, 1, final_confidence, "Confidence too low for unbeatable system"
+        # 進化による微調整（負けが多い時のみ閾値上昇）
+        if self.evolution.generation > 0 and len(self.trade_history) >= 10:
+            recent_losses = sum(1 for p in self.trade_history[-10:] if not p.was_win)
+            if recent_losses >= 3:
+                dynamic_threshold += 0.05  # 連敗時は少し厳しく
 
-        return True, action, final_confidence, "All checks passed"
+        if final_confidence < dynamic_threshold:
+            return False, 1, final_confidence, f"Below dynamic threshold ({dynamic_threshold:.2%})"
+
+        # 5. 利益期待値チェック（手数料考慮）
+        # 最低0.50の確信度があれば取引許可（高頻度取引のため）
+        if final_confidence < 0.50:
+            return False, 1, final_confidence, "Confidence below minimum 50%"
+
+        return True, action, final_confidence, f"GO: conf={final_confidence:.2%}, trades/hr={gate_details.get('trades_last_hour', 0)}"
 
     def record_trade_result(
         self,
@@ -519,6 +642,9 @@ class UnbeatableSystem:
         self.trade_history.append(pattern)
         self.total_trades += 1
 
+        # 動的閾値マネージャーにも記録
+        self.confidence_gate.record_trade(pnl)
+
         if was_win:
             self.winning_trades += 1
             self.consecutive_wins += 1
@@ -534,12 +660,12 @@ class UnbeatableSystem:
             # 即座に進化
             self.evolution.evolve_from_loss(pattern, market_conditions)
 
-            # 連続負けでロック
+            # 連続負けでロック（3連敗でロック、時間を短縮）
             recent_losses = sum(1 for p in self.trade_history[-5:] if not p.was_win)
-            if recent_losses >= 2:
+            if recent_losses >= 3:
                 self.is_locked = True
-                self.lock_until = datetime.now() + timedelta(minutes=5)
-                logger.warning(f"🔒 System locked for 5 minutes after {recent_losses} recent losses")
+                self.lock_until = datetime.now() + timedelta(minutes=2)  # 2分に短縮
+                logger.warning(f"🔒 System locked for 2 minutes after {recent_losses} recent losses")
 
             logger.warning(f"❌ Loss recorded - Evolving to prevent recurrence")
 
@@ -550,6 +676,7 @@ class UnbeatableSystem:
     def get_stats(self) -> Dict[str, Any]:
         """統計取得"""
         win_rate = self.winning_trades / self.total_trades if self.total_trades > 0 else 0
+        trades_per_hour = self.confidence_gate._count_trades_last_hour()
 
         return {
             "total_trades": self.total_trades,
@@ -562,7 +689,12 @@ class UnbeatableSystem:
             "loss_patterns_memorized": len(self.loss_memory.loss_patterns),
             "evolution_generation": self.evolution.generation,
             "is_locked": self.is_locked,
-            "target_achieved": win_rate >= 0.99,
+            "trades_per_hour": trades_per_hour,
+            "target_trades_per_hour": self.target_trades_per_hour,
+            "current_threshold": self.confidence_gate.current_threshold,
+            "win_streak": self.confidence_gate.win_streak,
+            "loss_streak": self.confidence_gate.loss_streak,
+            "target_achieved": win_rate >= 0.70 and trades_per_hour >= self.target_trades_per_hour * 0.5,
         }
 
     def save_state(self) -> None:
@@ -611,17 +743,18 @@ class UltimateDecisionMaker:
     """
     究極の意思決定システム
 
-    複数のセーフティネットを持つ最終判断システム
+    高頻度取引と高利益のバランスを取る最終判断システム
+    動的閾値により取引頻度を確保しつつ利益を最大化
     """
 
-    def __init__(self):
-        self.unbeatable = UnbeatableSystem()
+    def __init__(self, target_trades_per_hour: int = 50):
+        self.unbeatable = UnbeatableSystem(target_trades_per_hour=target_trades_per_hour)
 
         # 追加のセーフティチェック
         self.safety_checks: List[callable] = []
 
-        # 取引許可の厳格度
-        self.strictness_level = 0.99  # 99%の確信度が必要
+        # 最低確信度（動的閾値の下限）
+        self.min_confidence = 0.50
 
     def add_safety_check(self, check_func: callable) -> None:
         """セーフティチェック追加"""
@@ -640,7 +773,7 @@ class UltimateDecisionMaker:
         Returns:
             (action, confidence, should_execute, reason)
         """
-        # 無敗システムのチェック
+        # 無敗システムのチェック（動的閾値を使用）
         should_trade, action, confidence, reason = self.unbeatable.should_trade(
             features, model_predictions, indicator_signals, market_conditions
         )
@@ -658,11 +791,11 @@ class UltimateDecisionMaker:
                 logger.error(f"Safety check error: {e}")
                 return 1, 0.0, False, f"Safety check error"
 
-        # 最終確信度チェック
-        if confidence < self.strictness_level:
-            return 1, confidence, False, f"Below strictness level ({self.strictness_level})"
+        # 最低確信度チェック
+        if confidence < self.min_confidence:
+            return 1, confidence, False, f"Below minimum confidence ({self.min_confidence})"
 
-        return action, confidence, True, "✅ All systems GO"
+        return action, confidence, True, reason
 
     def record_result(
         self,
@@ -678,22 +811,30 @@ class UltimateDecisionMaker:
         """パフォーマンスレポート"""
         stats = self.unbeatable.get_stats()
 
+        target_status = '✅ TARGET OK!' if stats['target_achieved'] else '⏳ Optimizing...'
+
         report = f"""
 ╔══════════════════════════════════════════════════════════════════╗
-║          🏆 UNBEATABLE SYSTEM PERFORMANCE 🏆                      ║
+║       🚀 HIGH-FREQUENCY PROFIT SYSTEM PERFORMANCE 🚀              ║
 ╠══════════════════════════════════════════════════════════════════╣
-║ WIN RATE: {stats['win_rate_pct']:>10}  {'✅ TARGET ACHIEVED!' if stats['target_achieved'] else '⏳ Working towards 99%':>25}║
+║ WIN RATE: {stats['win_rate_pct']:>10}  {target_status:>25}║
 ╠══════════════════════════════════════════════════════════════════╣
+║ TRADING FREQUENCY                                                 ║
+║ Trades/Hour:      {stats['trades_per_hour']:>10,} / {stats['target_trades_per_hour']:>4} target                       ║
+║ Current Threshold:{stats['current_threshold']:>9.1%}                                    ║
+╠══════════════════════════════════════════════════════════════════╣
+║ TRADE STATISTICS                                                  ║
 ║ Total Trades:     {stats['total_trades']:>10,}                                    ║
 ║ Winning Trades:   {stats['winning_trades']:>10,}                                    ║
 ║ Losing Trades:    {stats['losing_trades']:>10,}                                    ║
-║ Current Streak:   {stats['consecutive_wins']:>10,} wins                              ║
-║ Max Streak:       {stats['max_consecutive_wins']:>10,} wins                              ║
+║ Win Streak:       {stats['win_streak']:>10,}                                    ║
+║ Loss Streak:      {stats['loss_streak']:>10,}                                    ║
+║ Max Win Streak:   {stats['max_consecutive_wins']:>10,}                                    ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║ EVOLUTION STATUS                                                  ║
 ║ Generation:       {stats['evolution_generation']:>10,}                                    ║
 ║ Patterns Memorized:{stats['loss_patterns_memorized']:>9,}                                    ║
-║ System Lock:      {'🔒 LOCKED' if stats['is_locked'] else '🔓 UNLOCKED':>10}                                    ║
+║ System Lock:      {'🔒 LOCKED' if stats['is_locked'] else '🔓 ACTIVE':>10}                                    ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
         return report
