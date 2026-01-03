@@ -1,0 +1,231 @@
+# World's Strongest AI Trader Configuration
+# =========================================
+
+# API Settings
+api:
+  base_url: "https://api.bitflyer.com"
+  timeout: 30
+  max_retries: 3
+  rate_limit:
+    requests_per_minute: 500
+    orders_per_minute: 300
+
+# Trading Pairs Configuration
+trading_pairs:
+  primary:
+    - "BTC_JPY"      # メイン取引ペア - 流動性最高
+    - "ETH_JPY"      # 第2取引ペア
+  secondary:
+    - "ETH_BTC"
+    - "XRP_JPY"
+    - "MONA_JPY"
+
+  # Lightning FX (レバレッジ取引)
+  leverage:
+    - "FX_BTC_JPY"   # 最大4倍レバレッジ
+
+# Strategy Configuration
+strategies:
+  # 1. Market Making Strategy (マーケットメイキング)
+  market_making:
+    enabled: true
+    weight: 0.25
+    spread_percentage: 0.05  # 0.05%スプレッド
+    order_depth: 5
+    inventory_limit: 0.3     # 在庫制限30%
+    refresh_interval_ms: 100
+
+  # 2. Momentum Strategy (モメンタム)
+  momentum:
+    enabled: true
+    weight: 0.20
+    lookback_periods: [5, 15, 30, 60]
+    rsi_oversold: 30
+    rsi_overbought: 70
+    macd_signal: true
+
+  # 3. Mean Reversion (平均回帰)
+  mean_reversion:
+    enabled: true
+    weight: 0.15
+    bollinger_period: 20
+    bollinger_std: 2.0
+    z_score_threshold: 2.0
+
+  # 4. Breakout Strategy (ブレイクアウト)
+  breakout:
+    enabled: true
+    weight: 0.15
+    lookback_period: 100
+    volume_confirmation: true
+    atr_multiplier: 2.0
+
+  # 5. Arbitrage (アービトラージ)
+  arbitrage:
+    enabled: true
+    weight: 0.10
+    min_spread: 0.1  # 最小スプレッド0.1%
+    pairs:
+      - ["BTC_JPY", "FX_BTC_JPY"]
+      - ["ETH_JPY", "ETH_BTC", "BTC_JPY"]
+
+  # 6. Machine Learning Strategy (機械学習)
+  ml_strategy:
+    enabled: true
+    weight: 0.15
+    model_type: "ensemble"  # ensemble, lstm, transformer
+    retrain_interval_hours: 24
+    prediction_horizon: 60  # 60秒先を予測
+    confidence_threshold: 0.65
+
+# Risk Management
+risk_management:
+  max_position_size: 0.5           # 総資産の50%まで
+  max_single_trade_size: 0.1       # 1取引で10%まで
+  max_daily_loss: 0.05             # 1日の最大損失5%
+  max_drawdown: 0.15               # 最大ドローダウン15%
+  stop_loss_percentage: 0.02       # 損切り2%
+  take_profit_percentage: 0.03     # 利確3%
+  trailing_stop: 0.01              # トレーリングストップ1%
+  position_sizing_method: "kelly"  # kelly, fixed, volatility_adjusted
+
+  # ボラティリティベースのリスク調整
+  volatility_adjustment:
+    enabled: true
+    target_volatility: 0.02
+    lookback_period: 24
+
+  # ポジション分散
+  diversification:
+    max_correlation: 0.7
+    min_pairs: 3
+
+# Order Execution
+execution:
+  order_type: "limit"              # limit優先でMaker手数料削減
+  slippage_tolerance: 0.001        # 0.1%スリッページ許容
+  partial_fill_handling: "wait"    # wait, cancel, market
+  iceberg_orders: true             # 大量注文を分割
+  iceberg_chunk_size: 0.01         # 0.01 BTCずつ
+  twap_enabled: true               # 時間加重平均価格
+
+  # スマートオーダールーティング
+  smart_routing:
+    enabled: true
+    optimize_for: "cost"           # cost, speed, fill_probability
+
+# High Frequency Trading Settings
+hft:
+  enabled: true
+  min_interval_ms: 50              # 最小取引間隔
+  websocket_enabled: true
+  order_book_depth: 20
+  tick_aggregation: 100            # 100ms単位でティック集約
+
+  # レイテンシ最適化
+  latency_optimization:
+    tcp_nodelay: true
+    connection_pooling: true
+    keep_alive: true
+
+# Machine Learning Models
+ml_models:
+  # 価格予測モデル
+  price_prediction:
+    type: "lstm"
+    input_features:
+      - "close"
+      - "volume"
+      - "vwap"
+      - "rsi"
+      - "macd"
+      - "bollinger_upper"
+      - "bollinger_lower"
+      - "atr"
+      - "obv"
+    sequence_length: 60
+    hidden_size: 128
+    num_layers: 3
+
+  # トレンド分類モデル
+  trend_classifier:
+    type: "xgboost"
+    features:
+      - "price_change_1m"
+      - "price_change_5m"
+      - "price_change_15m"
+      - "volume_ratio"
+      - "order_book_imbalance"
+    n_estimators: 200
+
+  # 強化学習エージェント
+  rl_agent:
+    type: "ppo"
+    state_dim: 50
+    action_dim: 3  # buy, sell, hold
+    learning_rate: 0.0003
+    gamma: 0.99
+
+  # アンサンブル設定
+  ensemble:
+    models:
+      - "lstm"
+      - "xgboost"
+      - "lightgbm"
+      - "catboost"
+    voting: "soft"
+    weights: [0.3, 0.25, 0.25, 0.2]
+
+# Backtesting
+backtesting:
+  start_date: "2023-01-01"
+  end_date: "2024-12-31"
+  initial_capital: 1000000  # 100万円
+  commission: 0.0015        # 0.15%
+  slippage: 0.001           # 0.1%
+
+# Monitoring & Alerts
+monitoring:
+  log_level: "INFO"
+  performance_tracking: true
+  trade_logging: true
+
+  alerts:
+    telegram:
+      enabled: true
+      chat_id: ""
+    slack:
+      enabled: false
+      webhook_url: ""
+    email:
+      enabled: false
+      smtp_server: ""
+
+  metrics:
+    prometheus:
+      enabled: true
+      port: 9090
+    grafana:
+      enabled: true
+      dashboard_id: "ai-trader"
+
+# Database
+database:
+  type: "postgresql"
+  host: "localhost"
+  port: 5432
+  name: "ai_trader"
+
+  redis:
+    host: "localhost"
+    port: 6379
+    db: 0
+
+# Performance Targets
+targets:
+  monthly_return: 0.30           # 月利30%目標
+  sharpe_ratio: 2.5              # シャープレシオ2.5以上
+  max_drawdown: 0.10             # 最大ドローダウン10%以内
+  win_rate: 0.55                 # 勝率55%以上
+  profit_factor: 1.8             # プロフィットファクター1.8以上
+  trades_per_day: 500            # 1日500回以上の取引
