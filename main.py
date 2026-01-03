@@ -1,148 +1,289 @@
 #!/usr/bin/env python3
 """
-World's Strongest AI Trader
-===========================
-bitFlyer用 高頻度AIトレーディングシステム
-月利30%以上を目指す世界最強トレーダー
+Ultimate AI Trading System - Main Entry Point
+==============================================
+世界最強AIトレーディングシステム
 
 Usage:
-    python main.py [--dry-run] [--config CONFIG_PATH]
-
-Environment Variables:
-    BITFLYER_API_KEY: bitFlyer APIキー
-    BITFLYER_API_SECRET: bitFlyer APIシークレット
+    python main.py                  # Start trading bot
+    python main.py --paper          # Paper trading mode
+    python main.py --status         # Show status
+    python main.py --health         # Health check endpoint
 """
 
-import os
-import sys
+import asyncio
 import argparse
-import signal
-import time
-from datetime import datetime
+import sys
+import os
+from pathlib import Path
+
+# Add project root to path
+PROJECT_ROOT = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from loguru import logger
 
-# ログ設定
+# Configure logging
 logger.remove()
 logger.add(
     sys.stderr,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
     level="INFO",
 )
 logger.add(
-    "logs/trader_{time:YYYY-MM-DD}.log",
+    "logs/trading_{time:YYYY-MM-DD}.log",
     rotation="1 day",
-    retention="30 days",
+    retention="7 days",
     level="DEBUG",
 )
 
 
+def print_banner():
+    """バナーを表示"""
+    banner = """
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║     🏆 ULTIMATE AI TRADING SYSTEM 🏆                         ║
+║         世界最強AIトレーディングシステム                        ║
+║                                                               ║
+║     Components:                                               ║
+║     ├─ PatchTST / Mamba / iTransformer                       ║
+║     ├─ PPO / SAC / C51 / QR-DQN                              ║
+║     ├─ DreamerV3 World Model                                 ║
+║     ├─ Vector DB Pattern Matching                            ║
+║     ├─ Multi-Agent System                                    ║
+║     └─ 500+ Dimension Feature Engineering                    ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+"""
+    print(banner)
+
+
+async def run_trading_bot(paper_trading: bool = True):
+    """取引Botを実行"""
+    from config.settings import get_config, reload_config
+    from src.bot.live_trader import LiveTrader
+
+    # Force paper trading if specified
+    if paper_trading:
+        os.environ["PAPER_TRADING"] = "true"
+        reload_config()
+
+    config = get_config()
+    trader = LiveTrader(config)
+
+    try:
+        await trader.start()
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal")
+        await trader.stop()
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        await trader.stop()
+        raise
+
+
+def run_health_server(port: int = 8080):
+    """ヘルスチェックサーバーを実行"""
+    from aiohttp import web
+    from config.settings import get_config
+
+    config = get_config()
+
+    async def health_handler(request):
+        """ヘルスチェックエンドポイント"""
+        return web.json_response({
+            "status": "healthy",
+            "service": "ultimate-ai-trader",
+            "config": config.to_dict(),
+        })
+
+    async def status_handler(request):
+        """ステータスエンドポイント"""
+        return web.json_response({
+            "status": "running",
+            "paper_trading": config.trading.paper_trading,
+            "product": config.bitflyer.product_code,
+        })
+
+    app = web.Application()
+    app.router.add_get("/health", health_handler)
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/status", status_handler)
+
+    logger.info(f"Starting health server on port {port}")
+    web.run_app(app, host="0.0.0.0", port=port)
+
+
+async def run_with_health_check(paper_trading: bool = True, port: int = 8080):
+    """Botとヘルスチェックを同時実行"""
+    from aiohttp import web
+    from config.settings import get_config, reload_config
+    from src.bot.live_trader import LiveTrader
+
+    if paper_trading:
+        os.environ["PAPER_TRADING"] = "true"
+        reload_config()
+
+    config = get_config()
+    trader = LiveTrader(config)
+
+    # Health check handlers
+    async def health_handler(request):
+        return web.json_response({
+            "status": "healthy",
+            "trading": trader.running,
+            "stats": trader.stats.to_dict() if trader.stats else {},
+        })
+
+    async def status_handler(request):
+        return web.json_response(trader.get_status())
+
+    # Setup web app
+    app = web.Application()
+    app.router.add_get("/health", health_handler)
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/status", status_handler)
+
+    # Start web server in background
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Health server started on port {port}")
+
+    # Run trader
+    try:
+        await trader.start()
+    except KeyboardInterrupt:
+        await trader.stop()
+    finally:
+        await runner.cleanup()
+
+
+def show_status():
+    """現在のステータスを表示"""
+    from config.settings import get_config
+
+    config = get_config()
+    print("\n📊 Current Configuration:")
+    print("-" * 40)
+
+    import json
+    print(json.dumps(config.to_dict(), indent=2))
+
+    print("\n🔧 Environment Variables Required:")
+    print("-" * 40)
+    print("""
+For Live Trading:
+  BITFLYER_API_KEY       - bitFlyer API Key
+  BITFLYER_API_SECRET    - bitFlyer API Secret
+
+For LINE Notifications:
+  LINE_NOTIFY_TOKEN      - LINE Notify Token
+                          (Get from https://notify-bot.line.me/)
+
+For Paper Trading (default):
+  PAPER_TRADING=true     - Enable paper trading mode
+""")
+
+
+def generate_env_file():
+    """環境変数テンプレートを生成"""
+    from config.settings import generate_env_template
+
+    generate_env_template(".env.template")
+    print("✅ .env.template generated")
+    print("Copy to .env and fill in your credentials:")
+    print("  cp .env.template .env")
+
+
 def main():
-    """メイン関数"""
+    """メインエントリーポイント"""
     parser = argparse.ArgumentParser(
-        description="World's Strongest AI Trader for bitFlyer"
+        description="Ultimate AI Trading System",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py                    Start trading (paper mode by default)
+  python main.py --live             Start live trading
+  python main.py --paper --port 8080  Paper trading with health endpoint
+  python main.py --status           Show configuration status
+  python main.py --gen-env          Generate .env template
+        """,
     )
+
     parser.add_argument(
-        "--dry-run",
+        "--paper",
         action="store_true",
-        help="Dry run mode (no actual trades)",
+        default=True,
+        help="Paper trading mode (default)",
     )
     parser.add_argument(
-        "--config",
-        type=str,
-        default="config/settings.yaml",
-        help="Config file path",
+        "--live",
+        action="store_true",
+        help="Live trading mode (requires API keys)",
     )
     parser.add_argument(
-        "--api-key",
-        type=str,
-        default=os.getenv("BITFLYER_API_KEY", ""),
-        help="bitFlyer API key",
+        "--port",
+        type=int,
+        default=8080,
+        help="Health check server port (default: 8080)",
     )
     parser.add_argument(
-        "--api-secret",
-        type=str,
-        default=os.getenv("BITFLYER_API_SECRET", ""),
-        help="bitFlyer API secret",
+        "--health-only",
+        action="store_true",
+        help="Run health server only (for testing)",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show current status and configuration",
+    )
+    parser.add_argument(
+        "--gen-env",
+        action="store_true",
+        help="Generate .env.template file",
     )
 
     args = parser.parse_args()
 
-    # APIキーチェック
-    if not args.api_key or not args.api_secret:
-        logger.error("API credentials not provided!")
-        logger.info("Set BITFLYER_API_KEY and BITFLYER_API_SECRET environment variables")
-        logger.info("Or use --api-key and --api-secret arguments")
-        sys.exit(1)
+    # Create logs directory
+    os.makedirs("logs", exist_ok=True)
+    os.makedirs("models", exist_ok=True)
 
-    # トレーダー初期化
-    from src.bot.trader import AITrader
+    if args.gen_env:
+        generate_env_file()
+        return
 
-    trader = AITrader(
-        api_key=args.api_key,
-        api_secret=args.api_secret,
-        config_path=args.config,
-    )
+    if args.status:
+        show_status()
+        return
 
-    # シグナルハンドラ設定
-    def signal_handler(sig, frame):
-        logger.info("Shutdown signal received...")
-        trader.stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    # スタートバナー
     print_banner()
 
-    if args.dry_run:
-        logger.info("🔍 DRY RUN MODE - No actual trades will be executed")
+    if args.health_only:
+        run_health_server(args.port)
+        return
 
-    # トレーディング開始
-    logger.info("🚀 Starting World's Strongest AI Trader...")
-    trader.start()
+    paper_trading = not args.live
 
-    # メインループ
+    if paper_trading:
+        logger.info("🧪 Starting in PAPER TRADING mode")
+    else:
+        logger.info("💰 Starting in LIVE TRADING mode")
+        logger.warning("⚠️ Real money will be used!")
+
     try:
-        while True:
-            # ステータス表示（1分ごと）
-            status = trader.get_status()
-            logger.info(
-                f"Status: Trades={status['trade_count']} "
-                f"PnL={status['daily_pnl']:+,.0f} JPY "
-                f"Positions={status['positions']['total_positions']}"
-            )
-            time.sleep(60)
-
+        asyncio.run(run_with_health_check(
+            paper_trading=paper_trading,
+            port=args.port,
+        ))
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received...")
-        trader.stop()
-
-
-def print_banner():
-    """バナー表示"""
-    banner = """
-╔══════════════════════════════════════════════════════════════════════╗
-║                                                                      ║
-║   🏆 WORLD'S STRONGEST AI TRADER 🏆                                  ║
-║                                                                      ║
-║   ██╗    ██╗ ██████╗ ██████╗ ██╗     ██████╗ ███████╗                ║
-║   ██║    ██║██╔═══██╗██╔══██╗██║     ██╔══██╗██╔════╝                ║
-║   ██║ █╗ ██║██║   ██║██████╔╝██║     ██║  ██║███████╗                ║
-║   ██║███╗██║██║   ██║██╔══██╗██║     ██║  ██║╚════██║                ║
-║   ╚███╔███╔╝╚██████╔╝██║  ██║███████╗██████╔╝███████║                ║
-║    ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝                ║
-║                                                                      ║
-║   🎯 TARGET: 30%+ MONTHLY RETURNS                                    ║
-║   ⚡ HIGH-FREQUENCY TRADING SYSTEM                                   ║
-║   🤖 6 AI-POWERED STRATEGIES                                         ║
-║   🛡️  ADVANCED RISK MANAGEMENT                                       ║
-║                                                                      ║
-║   Powered by: Machine Learning, Ensemble Strategies, Smart Execution║
-║                                                                      ║
-╚══════════════════════════════════════════════════════════════════════╝
-    """
-    print(banner)
+        logger.info("Shutdown requested")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
