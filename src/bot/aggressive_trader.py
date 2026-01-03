@@ -453,14 +453,44 @@ class AggressiveTrader:
         logger.info("🚀 Aggressive Trading Loop Started")
 
         tick = 0
+        rate_limit_backoff = 0  # レート制限バックオフ（秒）
+        poll_interval = 2.0  # 基本ポーリング間隔（秒）
+
         while self.running:
             try:
                 tick += 1
 
-                # 価格取得
-                prices = await self._fetch_prices()
+                # レート制限バックオフ中は待機
+                if rate_limit_backoff > 0:
+                    logger.warning(f"⏳ Rate limit backoff: {rate_limit_backoff}s")
+                    await asyncio.sleep(rate_limit_backoff)
+                    rate_limit_backoff = max(0, rate_limit_backoff - 5)
+
+                # 価格取得（順次取得でレート制限回避）
+                prices = {}
+                for pair in self.active_pairs:
+                    try:
+                        if pair in self.clients:
+                            ticker = await self.clients[pair].get_ticker()
+                            if ticker:
+                                prices[pair] = {
+                                    'price': ticker.ltp,
+                                    'bid': ticker.best_bid,
+                                    'ask': ticker.best_ask,
+                                    'spread': ticker.spread,
+                                    'volume': ticker.volume,
+                                }
+                                self.price_history[pair].add(ticker.ltp, ticker.volume)
+                                self.positions[pair].update(ticker.ltp)
+                        await asyncio.sleep(0.3)  # API間隔
+                    except Exception as e:
+                        if "429" in str(e) or "rate" in str(e).lower():
+                            rate_limit_backoff = min(rate_limit_backoff + 10, 60)
+                            logger.warning(f"Rate limit hit, backing off {rate_limit_backoff}s")
+                            break
+
                 if not prices:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(poll_interval)
                     continue
 
                 # 各ペアでシグナル生成・取引
@@ -475,8 +505,8 @@ class AggressiveTrader:
                         price = prices[pair]['price']
                         await self._execute_trade(pair, action, confidence, reason, price)
 
-                # 定期ステータス（30秒ごと）
-                if tick % 60 == 0:
+                # 定期ステータス（30秒ごと = 15 tick）
+                if tick % 15 == 0:
                     self._log_status()
 
                 # 目標達成チェック
@@ -490,12 +520,16 @@ class AggressiveTrader:
                             f"取引数: {self.total_trades}"
                         )
 
-                # 高速ループ（0.5秒）
-                await asyncio.sleep(0.5)
+                # ループ間隔（2秒 - レート制限対応）
+                await asyncio.sleep(poll_interval)
 
             except Exception as e:
-                logger.error(f"Loop error: {e}")
-                await asyncio.sleep(1)
+                if "429" in str(e):
+                    rate_limit_backoff = min(rate_limit_backoff + 15, 60)
+                    logger.warning(f"Rate limit in loop, backing off {rate_limit_backoff}s")
+                else:
+                    logger.error(f"Loop error: {e}")
+                await asyncio.sleep(3)
 
     def _log_status(self):
         """ステータスログ"""
