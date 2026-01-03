@@ -19,7 +19,7 @@ sys.path.insert(0, '/home/user/bitflyer')
 
 from config.settings import Config, get_config
 from src.api.bitflyer_client import BitFlyerClient, MockBitFlyerClient, OrderSide, OrderType
-from src.notifications.line_notify import LINENotifier, TradeNotification, NotificationManager
+from src.notifications.line_messaging import LINEMessagingAPI, TradeNotification
 
 
 @dataclass
@@ -98,17 +98,36 @@ class LiveTrader:
                 product_code=self.config.bitflyer.product_code,
             )
 
-        # LINE Notification
+        # LINE Notification (Messaging API対応)
         self.notifier = None
         if self.config.line.is_configured:
-            self.notifier = LINENotifier(
-                token=self.config.line.notify_token,
-                enable_trade_notifications=self.config.line.enable_trade_notifications,
-                enable_signal_notifications=self.config.line.enable_signal_notifications,
-                enable_risk_alerts=self.config.line.enable_risk_alerts,
-                min_confidence_to_notify=self.config.line.min_confidence_to_notify,
-            )
-            logger.info("📱 LINE notifications enabled")
+            if self.config.line.use_messaging_api:
+                # LINE Messaging API (推奨)
+                self.notifier = LINEMessagingAPI(
+                    channel_access_token=self.config.line.channel_access_token,
+                    user_id=self.config.line.user_id if self.config.line.user_id else None,
+                    enable_trade_notifications=self.config.line.enable_trade_notifications,
+                    enable_signal_notifications=self.config.line.enable_signal_notifications,
+                    enable_risk_alerts=self.config.line.enable_risk_alerts,
+                    min_confidence_to_notify=self.config.line.min_confidence_to_notify,
+                    min_pnl_to_notify=self.config.line.min_pnl_to_notify,
+                )
+                logger.info("📱 LINE Messaging API notifications enabled")
+            else:
+                # Legacy: LINE Notify (2025年3月31日終了予定)
+                try:
+                    from src.notifications.line_notify import LINENotifier
+                    self.notifier = LINENotifier(
+                        token=self.config.line.notify_token,
+                        enable_trade_notifications=self.config.line.enable_trade_notifications,
+                        enable_signal_notifications=self.config.line.enable_signal_notifications,
+                        enable_risk_alerts=self.config.line.enable_risk_alerts,
+                        min_confidence_to_notify=self.config.line.min_confidence_to_notify,
+                    )
+                    logger.warning("⚠️ LINE Notify enabled (終了予定: 2025年3月31日)")
+                    logger.warning("⚠️ LINE Messaging APIへの移行を推奨します")
+                except Exception as e:
+                    logger.error(f"LINE Notify initialization failed: {e}")
 
         # AI Engine (lazy load)
         self.ai_engine = None
@@ -294,14 +313,19 @@ class LiveTrader:
 
         # Send startup notification
         if self.notifier:
-            self.notifier.send_sync(f"""
-🚀 Trading Bot Started
+            startup_config = {
+                'paper_trading': self.config.trading.paper_trading,
+                'product': self.config.bitflyer.product_code,
+            }
+            if hasattr(self.notifier, 'notify_startup'):
+                self.notifier.notify_startup(startup_config)
+            elif hasattr(self.notifier, 'send_text'):
+                self.notifier.send_text(f"""🚀 Trading Bot Started
 
 📊 Product: {self.config.bitflyer.product_code}
 🧪 Mode: {'Paper' if self.config.trading.paper_trading else 'Live'}
 🤖 AI Engine: {'Loaded' if self.ai_engine else 'Fallback'}
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-""")
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}""")
 
         tick_count = 0
 
@@ -441,8 +465,11 @@ class LiveTrader:
 
         # Send shutdown notification
         if self.notifier:
-            self.notifier.send_sync(f"""
-🛑 Trading Bot Stopped
+            shutdown_stats = self.stats.to_dict()
+            if hasattr(self.notifier, 'notify_shutdown'):
+                self.notifier.notify_shutdown(shutdown_stats)
+            elif hasattr(self.notifier, 'send_text'):
+                self.notifier.send_text(f"""🛑 Trading Bot Stopped
 
 📊 Final Statistics:
 • Total Trades: {self.stats.total_trades}
@@ -450,8 +477,7 @@ class LiveTrader:
 • Total PnL: {self.stats.total_pnl:.2%}
 • Running Time: {self.stats.running_hours:.1f} hours
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-""")
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}""")
 
         logger.info("Bot stopped")
 

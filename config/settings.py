@@ -65,26 +65,46 @@ class BitFlyerConfig:
 
 @dataclass
 class LineConfig:
-    """LINE通知設定"""
-    notify_token: str = ""
+    """LINE通知設定（Messaging API対応）"""
+    # LINE Messaging API (推奨 - LINE Notifyは2025年3月31日で終了)
+    channel_access_token: str = ""  # Messaging APIチャネルアクセストークン
+    user_id: str = ""  # 通知先ユーザーID（オプション、未設定時はブロードキャスト）
+
+    # Legacy: LINE Notify (2025年3月31日終了予定)
+    notify_token: str = ""  # 後方互換性のため保持
+
+    # 通知設定
     enable_trade_notifications: bool = True
     enable_signal_notifications: bool = True
     enable_risk_alerts: bool = True
     min_confidence_to_notify: float = 0.6
+    min_pnl_to_notify: float = 0.001
 
     @classmethod
     def from_env(cls) -> "LineConfig":
         return cls(
+            # Messaging API (優先)
+            channel_access_token=get_env("LINE_CHANNEL_ACCESS_TOKEN", ""),
+            user_id=get_env("LINE_USER_ID", ""),
+            # Legacy Notify
             notify_token=get_env("LINE_NOTIFY_TOKEN", ""),
+            # Settings
             enable_trade_notifications=get_bool_env("LINE_ENABLE_TRADE", True),
             enable_signal_notifications=get_bool_env("LINE_ENABLE_SIGNAL", True),
             enable_risk_alerts=get_bool_env("LINE_ENABLE_RISK", True),
             min_confidence_to_notify=get_float_env("LINE_MIN_CONFIDENCE", 0.6),
+            min_pnl_to_notify=get_float_env("LINE_MIN_PNL", 0.001),
         )
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.notify_token)
+        """LINE通知が設定されているか"""
+        return bool(self.channel_access_token) or bool(self.notify_token)
+
+    @property
+    def use_messaging_api(self) -> bool:
+        """Messaging APIを使用するか"""
+        return bool(self.channel_access_token)
 
 
 @dataclass
@@ -231,6 +251,7 @@ class Config:
             },
             "line": {
                 "configured": self.line.is_configured,
+                "use_messaging_api": self.line.use_messaging_api,
                 "enable_trade": self.line.enable_trade_notifications,
                 "enable_signal": self.line.enable_signal_notifications,
                 "enable_risk": self.line.enable_risk_alerts,
@@ -296,13 +317,24 @@ BITFLYER_API_SECRET=your_api_secret_here
 BITFLYER_PRODUCT_CODE=BTC_JPY
 BITFLYER_TESTNET=false
 
-# ===== LINE Notify =====
-# Get token from: https://notify-bot.line.me/
-LINE_NOTIFY_TOKEN=your_line_token_here
+# ===== LINE Messaging API (推奨) =====
+# LINE Notifyは2025年3月31日で終了のため、Messaging APIを使用
+# 設定方法: https://developers.line.biz/console/
+# 1. プロバイダー作成 → Messaging APIチャネル作成
+# 2. チャネルアクセストークンを発行
+# 3. QRコードでBotを友だち追加
+LINE_CHANNEL_ACCESS_TOKEN=your_channel_access_token_here
+LINE_USER_ID=your_user_id_here
+
+# ===== LINE Notify (2025年3月31日終了予定) =====
+# 後方互換性のため残存。新規設定にはMessaging APIを使用してください
+# LINE_NOTIFY_TOKEN=your_line_token_here
+
 LINE_ENABLE_TRADE=true
 LINE_ENABLE_SIGNAL=true
 LINE_ENABLE_RISK=true
 LINE_MIN_CONFIDENCE=0.6
+LINE_MIN_PNL=0.001
 
 # ===== Trading Settings =====
 PAPER_TRADING=true

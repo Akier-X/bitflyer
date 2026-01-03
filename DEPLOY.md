@@ -10,15 +10,50 @@
 
 ## 🔧 事前準備
 
-### 1. LINE Notify トークン取得
+### 1. LINE Messaging API 設定（推奨）
+
+> ⚠️ **重要**: LINE Notifyは2025年3月31日にサービス終了予定です。新規設定にはLINE Messaging APIを使用してください。
+
+#### 手順
+
+1. **LINE Developers Console** にアクセス
+   - https://developers.line.biz/console/
+
+2. **プロバイダーを作成**
+   - 「新規プロバイダー作成」をクリック
+   - プロバイダー名を入力（例: "My Trading Bot"）
+
+3. **Messaging APIチャネルを作成**
+   - 「新規チャネル作成」→「Messaging API」を選択
+   - 必要情報を入力:
+     - チャネル名: AI Trader Bot
+     - チャネル説明: 自動売買通知Bot
+     - 大業種/小業種: 適切なものを選択
+
+4. **チャネルアクセストークンを発行**
+   - チャネル設定 → 「Messaging API設定」タブ
+   - 「チャネルアクセストークン（長期）」の「発行」をクリック
+   - 表示されたトークンをコピー → `LINE_CHANNEL_ACCESS_TOKEN`
+
+5. **Botを友だち追加**
+   - 同じページにあるQRコードをスマホで読み取り
+   - Botを友だち追加
+
+6. **ユーザーIDを取得**（オプション）
+   - Webhookを設定するか、LINE Official Account Managerで確認
+   - 自分のユーザーIDをコピー → `LINE_USER_ID`
+
+#### 無料枠について
+- 月200通まで無料
+- 追加メッセージは有料（従量課金）
+
+#### （旧）LINE Notify（2025年3月31日終了予定）
+
+既存のLINE Notifyトークンをお持ちの場合は一時的に使用可能ですが、
+早めにMessaging APIへ移行してください。
 
 1. https://notify-bot.line.me/ にアクセス
-2. LINEアカウントでログイン
-3. 「トークンを発行する」をクリック
-4. トークン名を入力（例: "AI Trader"）
-5. 通知を送るトークルームを選択
-6. 「発行する」をクリック
-7. 表示されたトークンをコピー（後で使用）
+2. トークンを取得 → `LINE_NOTIFY_TOKEN`（非推奨）
 
 ### 2. bitFlyer API キー取得（本番取引用）
 
@@ -53,7 +88,8 @@ git push origin main
 #    - Start Command: python main.py --paper --port $PORT
 #
 # 6. 環境変数を設定:
-#    - LINE_NOTIFY_TOKEN: [your-token]
+#    - LINE_CHANNEL_ACCESS_TOKEN: [your-token]
+#    - LINE_USER_ID: [your-user-id] (オプション)
 #    - PAPER_TRADING: true
 ```
 
@@ -71,7 +107,8 @@ railway init
 railway up
 
 # 3. 環境変数設定
-railway variables set LINE_NOTIFY_TOKEN=your-token
+railway variables set LINE_CHANNEL_ACCESS_TOKEN=your-token
+railway variables set LINE_USER_ID=your-user-id
 railway variables set PAPER_TRADING=true
 ```
 
@@ -88,7 +125,8 @@ flyctl auth login
 
 # 3. デプロイ
 flyctl launch
-flyctl secrets set LINE_NOTIFY_TOKEN=your-token
+flyctl secrets set LINE_CHANNEL_ACCESS_TOKEN=your-token
+flyctl secrets set LINE_USER_ID=your-user-id
 flyctl deploy
 ```
 
@@ -106,22 +144,30 @@ gcloud run deploy ai-trader \
   --platform managed \
   --region asia-northeast1 \
   --allow-unauthenticated \
-  --set-env-vars "LINE_NOTIFY_TOKEN=your-token,PAPER_TRADING=true"
+  --set-env-vars "LINE_CHANNEL_ACCESS_TOKEN=your-token,LINE_USER_ID=your-user-id,PAPER_TRADING=true"
 ```
 
 ---
 
 ## 📱 LINE通知設定
 
-### 通知テスト
+### 通知テスト（Messaging API）
 
 ```bash
 # 環境変数を設定してテスト
-export LINE_NOTIFY_TOKEN="your-token-here"
+export LINE_CHANNEL_ACCESS_TOKEN="your-channel-access-token-here"
+export LINE_USER_ID="your-user-id-here"  # オプション
+
 python -c "
-from src.notifications.line_notify import LINENotifier
-n = LINENotifier('$LINE_NOTIFY_TOKEN')
-n.send_sync('🚀 AI Trader テスト通知')
+from src.notifications.line_messaging import LINEMessagingAPI
+import os
+
+notifier = LINEMessagingAPI(
+    channel_access_token=os.environ['LINE_CHANNEL_ACCESS_TOKEN'],
+    user_id=os.environ.get('LINE_USER_ID'),
+)
+notifier.send_text('🚀 AI Trader テスト通知')
+print('通知送信完了！LINEを確認してください。')
 "
 ```
 
@@ -206,9 +252,16 @@ pip install -r requirements.txt
 ```
 
 ### LINE通知が届かない
-1. トークンが正しいか確認
-2. LINEアプリで通知がオンか確認
-3. ログを確認: `logs/trading_*.log`
+1. チャネルアクセストークンが正しいか確認
+2. Botを友だち追加しているか確認
+3. LINEアプリで通知がオンか確認
+4. 月間送信数が200通を超えていないか確認
+5. ログを確認: `logs/trading_*.log`
+
+### LINE Messaging API エラー
+- **401エラー**: チャネルアクセストークンが無効です
+- **400エラー**: ユーザーIDが不正、またはBotをブロックしています
+- **429エラー**: レート制限に達しました（しばらく待ってください）
 
 ### ポートエラー
 ```bash
