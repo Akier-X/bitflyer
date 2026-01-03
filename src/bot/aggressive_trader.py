@@ -129,13 +129,23 @@ class AggressiveTrader:
     MIN_INTERVAL_SECONDS = 3  # 最小3秒間隔
     MAX_TRADES_PER_HOUR = 200  # 1時間200回まで
 
-    def __init__(self, config: Config = None, initial_capital: float = 5000):
+    def __init__(self, config: Config = None, initial_capital: float = None):
         self.config = config or get_config()
-        self.initial_capital = initial_capital
-        self.current_capital = initial_capital
+        # 初期資本は後でAPIから取得
+        self.initial_capital = initial_capital or 0
+        self.current_capital = self.initial_capital
 
-        # アクティブペア
-        self.active_pairs = self._select_pairs_for_capital(initial_capital)
+        # API Client for balance check
+        self.balance_client = None
+        if not self.config.trading.paper_trading:
+            self.balance_client = BitFlyerClient(
+                api_key=self.config.bitflyer.api_key,
+                api_secret=self.config.bitflyer.api_secret,
+                product_code="BTC_JPY",
+            )
+
+        # アクティブペア（初期化後に更新される）
+        self.active_pairs = self._select_pairs_for_capital(initial_capital or 5000)
 
         # クライアント
         self.clients: Dict[str, any] = {}
@@ -507,6 +517,26 @@ class AggressiveTrader:
                     f"({pos.unrealized_pnl_pct:+.2f}%)"
                 )
 
+    async def _fetch_balance_from_api(self) -> float:
+        """APIから残高を取得"""
+        if self.balance_client:
+            try:
+                balances = await self.balance_client.get_balance()
+                if balances and not isinstance(balances, dict):
+                    for balance in balances:
+                        if balance.get('currency_code') == 'JPY':
+                            jpy_balance = float(balance.get('available', 0))
+                            logger.info(f"💰 API Balance: ¥{jpy_balance:,.0f}")
+                            return jpy_balance
+                elif isinstance(balances, dict) and 'error' not in balances:
+                    # Single balance response
+                    for balance in balances if isinstance(balances, list) else [balances]:
+                        if balance.get('currency_code') == 'JPY':
+                            return float(balance.get('available', 0))
+            except Exception as e:
+                logger.warning(f"Failed to fetch balance from API: {e}")
+        return 0
+
     async def start(self):
         """トレーダー開始"""
         if self.running:
@@ -514,6 +544,29 @@ class AggressiveTrader:
 
         self.running = True
         self.start_time = datetime.now()
+
+        # APIから残高を取得（指定がない場合）
+        if self.initial_capital == 0 and not self.config.trading.paper_trading:
+            logger.info("📡 Fetching balance from bitFlyer API...")
+            api_balance = await self._fetch_balance_from_api()
+            if api_balance > 0:
+                self.initial_capital = api_balance
+                self.current_capital = api_balance
+                self.max_capital = api_balance
+                # アクティブペアを再選択
+                self.active_pairs = self._select_pairs_for_capital(api_balance)
+                logger.info(f"✅ Balance fetched: ¥{api_balance:,.0f}")
+            else:
+                logger.warning("⚠️ Could not fetch balance, using default 5000")
+                self.initial_capital = 5000
+                self.current_capital = 5000
+                self.max_capital = 5000
+
+        # Paper mode default
+        if self.initial_capital == 0:
+            self.initial_capital = 5000
+            self.current_capital = 5000
+            self.max_capital = 5000
 
         logger.info("=" * 60)
         logger.info("  AGGRESSIVE SMALL ACCOUNT TRADER")

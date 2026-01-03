@@ -406,8 +406,8 @@ Examples:
     parser.add_argument(
         "--capital",
         type=float,
-        default=5000,
-        help="Initial capital for aggressive mode (default: 5000)",
+        default=0,
+        help="Initial capital for aggressive mode (default: auto-fetch from API)",
     )
     parser.add_argument(
         "--pairs",
@@ -449,7 +449,10 @@ Examples:
         logger.warning("⚠️ Real money will be used!")
 
     if args.aggressive:
-        logger.info(f"🔥 AGGRESSIVE MODE: ¥{args.capital:,.0f} -> ¥{args.capital * 3:,.0f}")
+        if args.capital > 0:
+            logger.info(f"🔥 AGGRESSIVE MODE: ¥{args.capital:,.0f} -> ¥{args.capital * 3:,.0f}")
+        else:
+            logger.info("🔥 AGGRESSIVE MODE: Auto-fetching balance from API")
         logger.info("🎯 Target: 3x return in 1 month")
         try:
             asyncio.run(run_aggressive_trader(
