@@ -579,25 +579,65 @@ class AggressiveTrader:
                     f"({pos.unrealized_pnl_pct:+.2f}%)"
                 )
 
-    async def _fetch_balance_from_api(self) -> float:
-        """APIから残高を取得"""
+    async def _fetch_balance_from_api(self) -> Tuple[float, Dict[str, float]]:
+        """APIから残高と保有コインを取得"""
+        jpy_balance = 0
+        crypto_holdings = {}
+
         if self.balance_client:
             try:
                 balances = await self.balance_client.get_balance()
                 if balances and not isinstance(balances, dict):
                     for balance in balances:
-                        if balance.get('currency_code') == 'JPY':
-                            jpy_balance = float(balance.get('available', 0))
-                            logger.info(f"💰 API Balance: ¥{jpy_balance:,.0f}")
-                            return jpy_balance
+                        currency = balance.get('currency_code', '')
+                        available = float(balance.get('available', 0))
+
+                        if currency == 'JPY':
+                            jpy_balance = available
+                            logger.info(f"💰 JPY Balance: ¥{jpy_balance:,.0f}")
+                        elif available > 0:
+                            crypto_holdings[currency] = available
+                            logger.info(f"🪙 {currency}: {available:.4f}")
+
                 elif isinstance(balances, dict) and 'error' not in balances:
-                    # Single balance response
                     for balance in balances if isinstance(balances, list) else [balances]:
-                        if balance.get('currency_code') == 'JPY':
-                            return float(balance.get('available', 0))
+                        currency = balance.get('currency_code', '')
+                        available = float(balance.get('available', 0))
+                        if currency == 'JPY':
+                            jpy_balance = available
+                        elif available > 0:
+                            crypto_holdings[currency] = available
+
             except Exception as e:
                 logger.warning(f"Failed to fetch balance from API: {e}")
-        return 0
+
+        return jpy_balance, crypto_holdings
+
+    async def _init_positions_from_holdings(self, holdings: Dict[str, float]):
+        """既存の保有コインからポジションを初期化"""
+        # 通貨コードとペアのマッピング
+        currency_to_pair = {
+            'XRP': 'XRP_JPY',
+            'MONA': 'MONA_JPY',
+            'XLM': 'XLM_JPY',
+            'ETH': 'ETH_JPY',
+            'BTC': 'BTC_JPY',
+        }
+
+        for currency, amount in holdings.items():
+            pair = currency_to_pair.get(currency)
+            if pair and pair in self.positions:
+                # 現在価格を取得して平均取得単価として使用
+                try:
+                    if pair in self.clients:
+                        ticker = await self.clients[pair].get_ticker()
+                        if ticker:
+                            self.positions[pair].size = amount
+                            self.positions[pair].entry_price = ticker.ltp
+                            self.positions[pair].current_price = ticker.ltp
+                            logger.info(f"📦 Position loaded: {pair} = {amount:.2f} @ ¥{ticker.ltp:,.0f}")
+                except Exception as e:
+                    logger.warning(f"Failed to get price for {pair}: {e}")
 
     async def start(self):
         """トレーダー開始"""
@@ -607,11 +647,17 @@ class AggressiveTrader:
         self.running = True
         self.start_time = datetime.now()
 
-        # APIから残高を取得（指定がない場合）
-        if self.initial_capital == 0 and not self.config.trading.paper_trading:
-            logger.info("📡 Fetching balance from bitFlyer API...")
-            api_balance = await self._fetch_balance_from_api()
-            if api_balance > 0:
+        # APIから残高と保有コインを取得
+        if not self.config.trading.paper_trading:
+            logger.info("📡 Fetching balance and holdings from bitFlyer API...")
+            api_balance, holdings = await self._fetch_balance_from_api()
+
+            # 保有コインをポジションに反映
+            if holdings:
+                await self._init_positions_from_holdings(holdings)
+                logger.info(f"📦 Loaded {len(holdings)} existing positions")
+
+            if self.initial_capital == 0 and api_balance > 0:
                 self.initial_capital = api_balance
                 self.current_capital = api_balance
                 self.max_capital = api_balance
