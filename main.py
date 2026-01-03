@@ -53,9 +53,30 @@ logger.add(
 )
 
 
-def print_banner():
+def print_banner(multi_asset: bool = False):
     """バナーを表示"""
-    banner = """
+    if multi_asset:
+        banner = """
++===============================================================+
+|                                                               |
+|     ULTIMATE MULTI-ASSET AI TRADING SYSTEM                    |
+|     World's Strongest Multi-Asset AI Trader                   |
+|                                                               |
+|     Supported Pairs:                                          |
+|     +-- BTC/JPY, ETH/JPY, XRP/JPY, MONA/JPY, XLM/JPY         |
+|     +-- FX_BTC/JPY (Lightning), ETH/BTC, BCH/BTC             |
+|                                                               |
+|     Features:                                                 |
+|     +-- All Pairs Simultaneous Monitoring                     |
+|     +-- Cross-Pair Arbitrage Detection                        |
+|     +-- Dynamic Portfolio Allocation                          |
+|     +-- High-Frequency Trading (0.5s interval)                |
+|     +-- SOTA AI + Multi-Agent System                          |
+|                                                               |
++===============================================================+
+"""
+    else:
+        banner = """
 +===============================================================+
 |                                                               |
 |     ULTIMATE AI TRADING SYSTEM                                |
@@ -128,6 +149,53 @@ def run_health_server(port: int = 8080):
 
     logger.info(f"Starting health server on port {port}")
     web.run_app(app, host="0.0.0.0", port=port)
+
+
+async def run_multi_asset_trader(paper_trading: bool = True, port: int = 8080):
+    """マルチアセットトレーダーを実行"""
+    from aiohttp import web
+    from config.settings import get_config, reload_config
+    from src.bot.multi_asset_trader import MultiAssetTrader
+
+    if paper_trading:
+        os.environ["PAPER_TRADING"] = "true"
+        reload_config()
+
+    config = get_config()
+    trader = MultiAssetTrader(config)
+
+    # Health check handlers
+    async def health_handler(request):
+        return web.json_response({
+            "status": "healthy",
+            "mode": "multi-asset",
+            "trading": trader.running,
+            "pairs": trader.active_pairs,
+        })
+
+    async def status_handler(request):
+        return web.json_response(trader.get_status())
+
+    # Setup web app
+    app = web.Application()
+    app.router.add_get("/health", health_handler)
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/status", status_handler)
+
+    # Start web server in background
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Health server started on port {port}")
+
+    # Run trader
+    try:
+        await trader.start()
+    except KeyboardInterrupt:
+        await trader.stop()
+    finally:
+        await runner.cleanup()
 
 
 async def run_with_health_check(paper_trading: bool = True, port: int = 8080):
@@ -260,8 +328,23 @@ Examples:
         action="store_true",
         help="Generate .env.template file",
     )
+    parser.add_argument(
+        "--multi",
+        action="store_true",
+        help="Multi-asset trading mode (all pairs)",
+    )
+    parser.add_argument(
+        "--pairs",
+        type=str,
+        default="",
+        help="Comma-separated trading pairs (e.g., BTC_JPY,ETH_JPY)",
+    )
 
     args = parser.parse_args()
+
+    # Set trading pairs from command line
+    if args.pairs:
+        os.environ["TRADING_PAIRS"] = args.pairs
 
     # Create logs directory
     os.makedirs("logs", exist_ok=True)
@@ -275,7 +358,7 @@ Examples:
         show_status()
         return
 
-    print_banner()
+    print_banner(multi_asset=args.multi)
 
     if args.health_only:
         run_health_server(args.port)
@@ -289,16 +372,29 @@ Examples:
         logger.info("💰 Starting in LIVE TRADING mode")
         logger.warning("⚠️ Real money will be used!")
 
-    try:
-        asyncio.run(run_with_health_check(
-            paper_trading=paper_trading,
-            port=args.port,
-        ))
-    except KeyboardInterrupt:
-        logger.info("Shutdown requested")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+    if args.multi:
+        logger.info("🌐 MULTI-ASSET MODE: Trading all pairs")
+        try:
+            asyncio.run(run_multi_asset_trader(
+                paper_trading=paper_trading,
+                port=args.port,
+            ))
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested")
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            sys.exit(1)
+    else:
+        try:
+            asyncio.run(run_with_health_check(
+                paper_trading=paper_trading,
+                port=args.port,
+            ))
+        except KeyboardInterrupt:
+            logger.info("Shutdown requested")
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
