@@ -340,8 +340,8 @@ class AggressiveTrader:
 
         return action, min(confidence, 1.0), ",".join(reasons)
 
-    def _calculate_order_size(self, pair: str, price: float) -> float:
-        """注文サイズを計算（全力投資）"""
+    def _calculate_order_size(self, pair: str, price: float, is_buy: bool) -> float:
+        """注文サイズを計算"""
         # ペアの最小サイズを取得
         min_size = 1.0
         for p, ms, _ in self.SMALL_ACCOUNT_PAIRS:
@@ -349,12 +349,23 @@ class AggressiveTrader:
                 min_size = ms
                 break
 
-        # 資本の80%を使用
-        available = self.current_capital * 0.8
-        max_size = available / price if price > 0 else 0
+        if is_buy:
+            # 買い: 資本の30%を使用（分散投資）
+            available = self.current_capital * 0.3
+            max_size = available / price if price > 0 else 0
 
-        # 最小サイズ以上で最大サイズ以下
-        size = max(min_size, min(max_size, min_size * 10))
+            # 最小サイズ以上かチェック
+            if max_size < min_size:
+                return 0  # 資金不足
+
+            # 最小サイズ〜最大サイズの範囲
+            size = min(max_size, min_size * 5)
+        else:
+            # 売り: 保有ポジションのみ
+            position = self.positions.get(pair)
+            if not position or position.size <= 0:
+                return 0  # ポジションなし
+            size = position.size
 
         return round(size, 2)
 
@@ -383,7 +394,12 @@ class AggressiveTrader:
             return False
 
         side = OrderSide.BUY if action == 2 else OrderSide.SELL
-        size = self._calculate_order_size(pair, price)
+        is_buy = (action == 2)
+        size = self._calculate_order_size(pair, price, is_buy)
+
+        # サイズが0なら取引しない
+        if size <= 0:
+            return False
 
         client = self.clients.get(pair)
         if not client:
