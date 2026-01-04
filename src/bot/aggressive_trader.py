@@ -754,6 +754,8 @@ class AggressiveTrader:
 
         ユーザーがWebサイトから取引した場合や、
         入金・出金があった場合に状態を同期する
+
+        重要: APIの値を常に正として扱う
         """
         if self.config.trading.paper_trading:
             return
@@ -762,13 +764,12 @@ class AggressiveTrader:
             # APIから最新残高を取得
             api_balance, holdings = await self._fetch_balance_from_api()
 
-            # 現金残高の変化を検出
+            # 現金残高の変化を検出・通知
             if self.last_known_api_balance > 0:
                 balance_diff = api_balance - self.last_known_api_balance
 
                 if abs(balance_diff) > 100:  # ¥100以上の変化
                     if balance_diff > 0:
-                        # 入金または売却
                         logger.info(f"💹 外部変化検出: +¥{balance_diff:,.0f} (入金または売却)")
                         if self.notifier:
                             self.notifier.send_text(
@@ -778,7 +779,6 @@ class AggressiveTrader:
                                 f"⏰ {datetime.now().strftime('%H:%M:%S')}"
                             )
                     else:
-                        # 出金または購入
                         logger.info(f"💸 外部変化検出: ¥{balance_diff:,.0f} (出金または購入)")
                         if self.notifier:
                             self.notifier.send_text(
@@ -788,26 +788,61 @@ class AggressiveTrader:
                                 f"⏰ {datetime.now().strftime('%H:%M:%S')}"
                             )
 
-            # 保有ポジションの変化を検出
+            # ============================================
+            # ポジションを完全にAPIから同期（重要！）
+            # ============================================
+            currency_to_pair = {
+                'XRP': 'XRP_JPY',
+                'MONA': 'MONA_JPY',
+                'XLM': 'XLM_JPY',
+                'ETH': 'ETH_JPY',
+                'BTC': 'BTC_JPY',
+            }
+
+            # 全ペアのポジションをリセット
+            for pair in self.positions:
+                # API上に存在しない通貨はゼロにリセット
+                currency = pair.replace('_JPY', '')
+                if currency not in holdings:
+                    if self.positions[pair].size > 0:
+                        logger.info(f"📤 ポジションリセット: {pair} (APIに存在しない)")
+                    self.positions[pair].size = 0
+                    self.positions[pair].entry_price = 0
+
+            # APIの保有量でポジションを更新
             for currency, amount in holdings.items():
-                pair = f"{currency}_JPY"
-                last_amount = self.last_known_positions.get(currency, 0)
+                pair = currency_to_pair.get(currency)
+                if pair and pair in self.positions:
+                    old_size = self.positions[pair].size
 
-                if abs(amount - last_amount) > 0.001:
-                    if pair in self.positions:
-                        # ポジション更新
-                        old_size = self.positions[pair].size
-                        self.positions[pair].size = amount
+                    # APIの値を正として設定
+                    self.positions[pair].size = amount
 
+                    # 現在価格を取得してエントリー価格を更新
+                    if pair in self.clients and amount > 0:
+                        try:
+                            ticker = await self.clients[pair].get_ticker()
+                            if ticker:
+                                self.positions[pair].current_price = ticker.ltp
+                                # エントリー価格が0の場合は現在価格で初期化
+                                if self.positions[pair].entry_price == 0:
+                                    self.positions[pair].entry_price = ticker.ltp
+                        except:
+                            pass
+
+                    # 変化を検出してログ
+                    if abs(amount - old_size) > 0.001:
                         if amount > old_size:
-                            logger.info(f"📦 外部購入検出: {currency} +{amount - old_size:.4f}")
+                            logger.info(f"📦 外部購入検出: {currency} +{amount - old_size:.4f} (合計: {amount:.4f})")
                         elif amount < old_size:
-                            logger.info(f"📤 外部売却検出: {currency} -{old_size - amount:.4f}")
+                            logger.info(f"📤 外部売却検出: {currency} -{old_size - amount:.4f} (合計: {amount:.4f})")
 
             # 現在の状態を保存
             self.last_known_api_balance = api_balance
             self.current_capital = api_balance  # 現金残高を同期
             self.last_known_positions = holdings.copy()
+
+            logger.debug(f"🔄 External sync: JPY=¥{api_balance:,.0f}, holdings={len(holdings)}")
 
         except Exception as e:
             logger.debug(f"External sync failed: {e}")
@@ -1222,24 +1257,23 @@ class AggressiveTrader:
                 self.trades_this_hour += 1
                 self.total_trades += 1
 
-                # ポジション更新
+                # ============================================
+                # ポジション更新（APIと同期するため最小限に）
+                # ============================================
                 position = self.positions[pair]
                 cost = price * size
 
                 if side == OrderSide.BUY:
-                    # 買い: 資本から購入コストを引く
+                    # 買い: 資本から購入コストを引く（概算）
+                    # 注: 実際の残高は外部同期で更新される
                     self.current_capital -= cost
-                    position.size += size
-                    # 平均取得単価を計算
-                    if position.entry_price > 0:
-                        total_cost = (position.entry_price * (position.size - size)) + cost
-                        position.entry_price = total_cost / position.size
-                    else:
+                    # エントリー価格を記録（外部同期でサイズは更新される）
+                    if position.entry_price == 0:
                         position.entry_price = price
                     position.entry_time = datetime.now()
-                    logger.info(f"  💰 Available: ¥{self.current_capital:,.0f}")
+                    logger.info(f"  💰 Estimated Available: ¥{self.current_capital:,.0f}")
                 else:
-                    # 売り: 売却収入を資本に加算
+                    # 売り: 売却収入を資本に加算（概算）
                     self.current_capital += cost
                     # 決済PnL計算
                     if position.size > 0 and position.entry_price > 0:
@@ -1254,10 +1288,9 @@ class AggressiveTrader:
                         if kelly_sizer:
                             kelly_sizer.update(pnl)
 
-                    position.size -= size
-                    if position.size <= 0:
-                        position.size = 0
-                        position.entry_price = 0
+                # 注: position.sizeは外部同期(_sync_external_state)で
+                # APIから取得した正確な値に更新される
+                # ローカルでの加減算は行わない（二重カウント防止）
 
                 # 最大資本更新
                 if self.current_capital > self.max_capital:
@@ -1280,6 +1313,9 @@ class AggressiveTrader:
                 # 通知（日本語・10回ごと）
                 if self.notifier and self.total_trades % 10 == 0:
                     self._send_trade_notification(pair, side.value, size, price, trade_pnl if trade_pnl != 0 else None)
+
+                # 取引後に即座に外部同期をスケジュール（次のループで実行）
+                self.last_external_sync = datetime.now() - timedelta(seconds=self.external_sync_interval + 1)
 
                 return True
 
