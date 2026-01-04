@@ -272,6 +272,15 @@ class AggressiveTrader:
         if spread_pct > 0.005:  # 0.5%以上
             return 1, 0.0, "wide_spread"
 
+        # 現金不足チェック - 買いは禁止、売りのみ許可
+        min_size = 1.0
+        for p, ms, _ in self.SMALL_ACCOUNT_PAIRS:
+            if p == pair:
+                min_size = ms
+                break
+        min_order_cost = min_size * current_price
+        can_buy = self.current_capital >= min_order_cost
+
         momentum = history.momentum
         volatility = history.volatility
         trend = history.trend
@@ -345,6 +354,17 @@ class AggressiveTrader:
                 confidence = 0.9
                 reasons = ["stop_loss"]
 
+        # 現金不足時はBUYをブロック
+        if action == 2 and not can_buy:
+            # ポジションがあれば売りを検討
+            if position and position.size > 0:
+                action = 0  # SELL
+                reasons = ["low_cash_sell"]
+            else:
+                action = 1  # HOLD
+                reasons = ["insufficient_cash"]
+                confidence = 0
+
         return action, min(confidence, 1.0), ",".join(reasons)
 
     def _calculate_order_size(self, pair: str, price: float, is_buy: bool) -> float:
@@ -357,8 +377,20 @@ class AggressiveTrader:
                 break
 
         if is_buy:
+            # 最小注文金額を計算
+            min_order_cost = min_size * price
+
+            # 現金が最小注文金額未満なら買えない
+            if self.current_capital < min_order_cost:
+                return 0  # 資金不足
+
             # 買い: 資本の30%を使用（分散投資）
-            available = self.current_capital * 0.3
+            # ただし最低でも最小注文金額は確保
+            available = max(self.current_capital * 0.3, min_order_cost)
+
+            # 実際に使える金額は現金残高まで
+            available = min(available, self.current_capital * 0.95)  # 5%の余裕を持つ
+
             max_size = available / price if price > 0 else 0
 
             # 最小サイズ以上かチェック
@@ -546,6 +578,16 @@ class AggressiveTrader:
                 # 定期ステータス（30秒ごと = 15 tick）
                 if tick % 15 == 0:
                     self._log_status()
+
+                # 定期残高更新（5分ごと = 150 tick）
+                if tick % 150 == 0 and not self.config.trading.paper_trading:
+                    try:
+                        api_balance, _ = await self._fetch_balance_from_api()
+                        if api_balance > 0:
+                            self.current_capital = api_balance
+                            logger.info(f"💰 Balance refreshed: ¥{api_balance:,.0f}")
+                    except Exception:
+                        pass
 
                 # 定期状態保存（60秒ごと）
                 if (datetime.now() - self.last_state_save).seconds >= self.state_save_interval:
