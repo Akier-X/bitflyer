@@ -122,14 +122,14 @@ class AggressiveTrader:
         ("ETH_JPY", 0.01, 5000),    # 0.01 ETH ≈ 5000円
     ]
 
-    # 利確・損切りライン
-    TAKE_PROFIT_PCT = 0.8    # 0.8%で利確
-    STOP_LOSS_PCT = -0.5     # -0.5%で損切り
-    TRAILING_STOP_PCT = 0.3  # 0.3%トレーリングストップ
+    # 利確・損切りライン（超攻撃的設定）
+    TAKE_PROFIT_PCT = 0.5    # 0.5%で即利確（高速回転）
+    STOP_LOSS_PCT = -0.3     # -0.3%で即損切り（損失最小化）
+    TRAILING_STOP_PCT = 0.2  # 0.2%トレーリングストップ
 
-    # 取引頻度
-    MIN_INTERVAL_SECONDS = 3  # 最小3秒間隔
-    MAX_TRADES_PER_HOUR = 200  # 1時間200回まで
+    # 取引頻度（超高速設定）
+    MIN_INTERVAL_SECONDS = 0.5  # 500ms間隔（ミリ秒単位の高速取引）
+    MAX_TRADES_PER_HOUR = 1000  # 1時間1000回まで（無制限に近い）
 
     def __init__(self, config: Config = None, initial_capital: float = None):
         self.config = config or get_config()
@@ -289,56 +289,69 @@ class AggressiveTrader:
         confidence = 0.0
         reasons = []
 
-        # === 攻撃的シグナル生成 ===
+        # === 超攻撃的シグナル生成（世界最強設定） ===
 
-        # 1. モメンタムシグナル
-        if momentum > 0.002:  # 0.2%上昇
+        # 1. モメンタムシグナル（超高感度）
+        if momentum > 0.001:  # 0.1%上昇で即反応
             action = 2  # BUY
-            confidence += 0.3
+            confidence += 0.4
             reasons.append("momentum_up")
-        elif momentum < -0.002:
+        elif momentum < -0.001:  # 0.1%下落で即反応
             action = 0  # SELL
-            confidence += 0.3
+            confidence += 0.4
             reasons.append("momentum_down")
 
-        # 2. トレンドフォロー
-        if trend == 1 and action == 2:
-            confidence += 0.25
+        # 2. トレンドフォロー（強化）
+        if trend == 1:
+            if action == 2:
+                confidence += 0.3
+            elif action == 1:  # HOLDでもトレンド中は買い
+                action = 2
+                confidence += 0.25
             reasons.append("uptrend")
-        elif trend == -1 and action == 0:
-            confidence += 0.25
+        elif trend == -1:
+            if action == 0:
+                confidence += 0.3
             reasons.append("downtrend")
 
-        # 3. ボラティリティボーナス
-        if volatility > 0.005:  # 高ボラ
-            confidence += 0.2
-            reasons.append("high_volatility")
+        # 3. ボラティリティボーナス（低閾値）
+        if volatility > 0.003:  # 低ボラでも反応
+            confidence += 0.25
+            reasons.append("volatility_opportunity")
 
-        # 4. ゴールデンクロス/デッドクロス
+        # 4. ゴールデンクロス/デッドクロス（高感度）
         sma_5 = history.sma_5
         sma_20 = history.sma_20
         if sma_5 > 0 and sma_20 > 0:
-            if sma_5 > sma_20 * 1.002 and action != 0:
+            if sma_5 > sma_20 * 1.001 and action != 0:  # 0.1%差で反応
                 action = 2
-                confidence += 0.15
+                confidence += 0.2
                 reasons.append("golden_cross")
-            elif sma_5 < sma_20 * 0.998 and action != 2:
+            elif sma_5 < sma_20 * 0.999 and action != 2:
                 action = 0
-                confidence += 0.15
+                confidence += 0.2
                 reasons.append("dead_cross")
 
-        # 5. 価格の急変検出
+        # 5. 価格の急変検出（超高感度）
         if len(history.prices) >= 3:
             last_3 = list(history.prices)[-3:]
             quick_change = (last_3[-1] - last_3[0]) / last_3[0]
-            if quick_change > 0.003:  # 0.3%急騰
+            if quick_change > 0.002:  # 0.2%急騰で即買い
+                action = 2
+                confidence += 0.3
+                reasons.append("quick_pump")
+            elif quick_change < -0.002:  # 0.2%急落で即売り
+                action = 0
+                confidence += 0.3
+                reasons.append("quick_dump")
+
+        # 6. スキャルピングボーナス（ポジションなしで買いやすく）
+        if action == 1 and (not position or position.size == 0):
+            # ポジションがなく、わずかでも上昇傾向なら買い
+            if momentum > 0.0005:
                 action = 2
                 confidence += 0.2
-                reasons.append("quick_pump")
-            elif quick_change < -0.003:
-                action = 0
-                confidence += 0.2
-                reasons.append("quick_dump")
+                reasons.append("scalp_entry")
 
         # ポジションチェック
         position = self.positions.get(pair)
@@ -384,12 +397,15 @@ class AggressiveTrader:
             if self.current_capital < min_order_cost:
                 return 0  # 資金不足
 
-            # 買い: 資本の30%を使用（分散投資）
-            # ただし最低でも最小注文金額は確保
-            available = max(self.current_capital * 0.3, min_order_cost)
+            # 買い: 資本の50%を使用（攻撃的分散投資）
+            # 全額投入でリターン最大化
+            available = self.current_capital * 0.5
 
-            # 実際に使える金額は現金残高まで
-            available = min(available, self.current_capital * 0.95)  # 5%の余裕を持つ
+            # 最低でも最小注文金額は確保
+            available = max(available, min_order_cost)
+
+            # 全資金を使用可能（制限なし）
+            available = min(available, self.current_capital)
 
             max_size = available / price if price > 0 else 0
 
@@ -397,8 +413,8 @@ class AggressiveTrader:
             if max_size < min_size:
                 return 0  # 資金不足
 
-            # 最小サイズ〜最大サイズの範囲
-            size = min(max_size, min_size * 5)
+            # サイズ制限なし - 最大限の利益追求
+            size = max_size
         else:
             # 売り: 保有ポジションのみ
             position = self.positions.get(pair)
@@ -519,12 +535,12 @@ class AggressiveTrader:
         return False
 
     async def _trading_loop(self):
-        """メイン取引ループ"""
-        logger.info("🚀 Aggressive Trading Loop Started")
+        """メイン取引ループ（超高速モード）"""
+        logger.info("🚀 ULTRA AGGRESSIVE Trading Loop Started - 世界最強モード")
 
         tick = 0
         rate_limit_backoff = 0  # レート制限バックオフ（秒）
-        poll_interval = 2.0  # 基本ポーリング間隔（秒）
+        poll_interval = 1.0  # 高速ポーリング（1秒間隔）
 
         while self.running:
             try:
@@ -552,10 +568,10 @@ class AggressiveTrader:
                                 }
                                 self.price_history[pair].add(ticker.ltp, ticker.volume)
                                 self.positions[pair].update(ticker.ltp)
-                        await asyncio.sleep(0.3)  # API間隔
+                        await asyncio.sleep(0.15)  # 超高速API間隔（150ms）
                     except Exception as e:
                         if "429" in str(e) or "rate" in str(e).lower():
-                            rate_limit_backoff = min(rate_limit_backoff + 10, 60)
+                            rate_limit_backoff = min(rate_limit_backoff + 5, 30)
                             logger.warning(f"Rate limit hit, backing off {rate_limit_backoff}s")
                             break
 
@@ -563,24 +579,24 @@ class AggressiveTrader:
                     await asyncio.sleep(poll_interval)
                     continue
 
-                # 各ペアでシグナル生成・取引
+                # 各ペアでシグナル生成・取引（超攻撃的）
                 for pair in self.active_pairs:
                     if pair not in prices:
                         continue
 
                     action, confidence, reason = self._generate_signal(pair, prices)
 
-                    # 信頼度閾値（攻撃的: 0.35）
-                    if action != 1 and confidence >= 0.35:
+                    # 信頼度閾値（超攻撃的: 0.25）- わずかなチャンスも逃さない
+                    if action != 1 and confidence >= 0.25:
                         price = prices[pair]['price']
                         await self._execute_trade(pair, action, confidence, reason, price)
 
-                # 定期ステータス（30秒ごと = 15 tick）
-                if tick % 15 == 0:
+                # 定期ステータス（30秒ごと = 30 tick @ 1秒間隔）
+                if tick % 30 == 0:
                     self._log_status()
 
-                # 定期残高更新（5分ごと = 150 tick）
-                if tick % 150 == 0 and not self.config.trading.paper_trading:
+                # 定期残高更新（3分ごと = 180 tick @ 1秒間隔）
+                if tick % 180 == 0 and not self.config.trading.paper_trading:
                     try:
                         api_balance, _ = await self._fetch_balance_from_api()
                         if api_balance > 0:
