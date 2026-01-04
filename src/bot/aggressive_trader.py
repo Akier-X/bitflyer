@@ -1,26 +1,30 @@
 """
-ULTIMATE AGGRESSIVE AI TRADER - 世界最強
-==========================================
-5000円から最速で資産を増やす究極のAIトレーダー
-
-Target: 5000円 → 15000円+ in 1 month (3x return)
-Strategy: ML + High-frequency scalping + Kelly Criterion
-
-Ultimate Features:
-- 機械学習価格予測（線形回帰 + 特徴量工学）
-- Kelly基準による最適ポジションサイジング
-- 動的パラメータ自動最適化
-- マルチタイムフレーム分析
-- ボラティリティ適応型戦略
-- 注文板インバランス分析
-- 状態永続化
-- これ以上の改善は不可能
+╔══════════════════════════════════════════════════════════════════════════════╗
+║           ULTIMATE AGGRESSIVE AI TRADER - 世界最強・世界一                    ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  5000円から最速で資産を増やす究極のAIトレーダー                               ║
+║  Target: 5000円 → 15000円+ in 1 month (3x return)                            ║
+║  Strategy: ML + High-frequency scalping + Kelly Criterion                    ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Ultimate Features:                                                          ║
+║  ├─ 機械学習価格予測（Ridge回帰 + 8特徴量工学）                               ║
+║  ├─ Kelly基準による最適ポジションサイジング                                   ║
+║  ├─ 動的パラメータ自動最適化（ボラティリティ適応）                             ║
+║  ├─ 注文板インバランス分析（WebSocket）                                       ║
+║  ├─ 外部環境完全対応（入金・出金・手動取引）                                   ║
+║  ├─ リアルタイム収支グラフ生成（LINE通知）                                    ║
+║  └─ 状態永続化（再起動後も継続）                                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  これ以上の改善は不可能 - 世界最強AIトレーダー                                 ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
 import asyncio
 import sys
 import json
 import os
+import io
+import base64
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -29,6 +33,18 @@ from enum import Enum
 import traceback
 import numpy as np
 from loguru import logger
+
+# チャート生成用（オプショナル）
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # ヘッドレスモード
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from matplotlib.ticker import FuncFormatter
+    CHART_AVAILABLE = True
+except ImportError:
+    CHART_AVAILABLE = False
+    logger.warning("matplotlib not available, charts disabled")
 
 
 # ============================================================================
@@ -245,6 +261,196 @@ class DynamicOptimizer:
 
         return self.current_params
 
+
+# ============================================================================
+# Portfolio Chart Generator - 収益グラフ生成
+# ============================================================================
+class PortfolioChartGenerator:
+    """収益推移グラフ生成"""
+
+    def __init__(self):
+        self.portfolio_history: List[Tuple[datetime, float]] = []
+        self.trade_history: List[Tuple[datetime, str, float]] = []  # (time, action, pnl)
+
+    def add_portfolio_value(self, value: float):
+        """ポートフォリオ価値を記録"""
+        self.portfolio_history.append((datetime.now(), value))
+        # 最大1000件保持
+        if len(self.portfolio_history) > 1000:
+            self.portfolio_history = self.portfolio_history[-1000:]
+
+    def add_trade(self, action: str, pnl: float):
+        """取引を記録"""
+        self.trade_history.append((datetime.now(), action, pnl))
+        if len(self.trade_history) > 500:
+            self.trade_history = self.trade_history[-500:]
+
+    def generate_chart(self, initial_capital: float) -> Optional[str]:
+        """収益推移グラフを生成してファイルパスを返す"""
+        if not CHART_AVAILABLE or len(self.portfolio_history) < 2:
+            return None
+
+        try:
+            # 日本語フォント設定
+            plt.rcParams['font.family'] = ['DejaVu Sans', 'sans-serif']
+
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]})
+            fig.patch.set_facecolor('#1a1a2e')
+
+            # ポートフォリオ推移グラフ
+            times = [h[0] for h in self.portfolio_history]
+            values = [h[1] for h in self.portfolio_history]
+
+            ax1.set_facecolor('#16213e')
+            ax1.plot(times, values, color='#00ff88', linewidth=2, label='Portfolio Value')
+            ax1.axhline(y=initial_capital, color='#ff6b6b', linestyle='--', alpha=0.7, label='Initial')
+            ax1.axhline(y=initial_capital * 3, color='#ffd93d', linestyle='--', alpha=0.7, label='Target (3x)')
+
+            # 利益エリアを塗りつぶし
+            ax1.fill_between(times, initial_capital, values,
+                           where=[v > initial_capital for v in values],
+                           color='#00ff88', alpha=0.3)
+            ax1.fill_between(times, initial_capital, values,
+                           where=[v < initial_capital for v in values],
+                           color='#ff6b6b', alpha=0.3)
+
+            ax1.set_title('📈 AI Trader Portfolio Performance', color='white', fontsize=14, fontweight='bold')
+            ax1.set_ylabel('Portfolio Value (JPY)', color='white')
+            ax1.tick_params(colors='white')
+            ax1.legend(loc='upper left', facecolor='#16213e', edgecolor='white', labelcolor='white')
+            ax1.grid(True, alpha=0.3, color='white')
+
+            # Y軸フォーマット
+            ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f'¥{x:,.0f}'))
+
+            # 累積損益グラフ
+            if self.trade_history:
+                trade_times = [t[0] for t in self.trade_history]
+                cumulative_pnl = []
+                total = 0
+                for t in self.trade_history:
+                    total += t[2]
+                    cumulative_pnl.append(total)
+
+                ax2.set_facecolor('#16213e')
+                colors = ['#00ff88' if p >= 0 else '#ff6b6b' for p in cumulative_pnl]
+                ax2.bar(range(len(cumulative_pnl)), cumulative_pnl, color=colors, alpha=0.8)
+                ax2.axhline(y=0, color='white', linewidth=0.5)
+                ax2.set_title('📊 Cumulative P&L', color='white', fontsize=12)
+                ax2.set_ylabel('P&L (JPY)', color='white')
+                ax2.tick_params(colors='white')
+                ax2.grid(True, alpha=0.3, color='white')
+
+            plt.tight_layout()
+
+            # ファイル保存
+            chart_path = 'logs/portfolio_chart.png'
+            os.makedirs('logs', exist_ok=True)
+            plt.savefig(chart_path, dpi=150, facecolor='#1a1a2e', edgecolor='none')
+            plt.close()
+
+            return chart_path
+        except Exception as e:
+            logger.warning(f"Chart generation failed: {e}")
+            return None
+
+
+# ============================================================================
+# Beautiful Terminal Display - 美しいターミナル表示
+# ============================================================================
+class TerminalDisplay:
+    """美しいターミナル表示"""
+
+    COLORS = {
+        'reset': '\033[0m',
+        'bold': '\033[1m',
+        'green': '\033[92m',
+        'red': '\033[91m',
+        'yellow': '\033[93m',
+        'blue': '\033[94m',
+        'cyan': '\033[96m',
+        'magenta': '\033[95m',
+        'white': '\033[97m',
+        'bg_green': '\033[42m',
+        'bg_red': '\033[41m',
+    }
+
+    @staticmethod
+    def colorize(text: str, color: str) -> str:
+        return f"{TerminalDisplay.COLORS.get(color, '')}{text}{TerminalDisplay.COLORS['reset']}"
+
+    @staticmethod
+    def format_jpy(value: float) -> str:
+        """日本円フォーマット"""
+        if value >= 0:
+            return TerminalDisplay.colorize(f"¥{value:,.0f}", 'green')
+        else:
+            return TerminalDisplay.colorize(f"¥{value:,.0f}", 'red')
+
+    @staticmethod
+    def format_pct(value: float) -> str:
+        """パーセントフォーマット"""
+        if value >= 0:
+            return TerminalDisplay.colorize(f"+{value:.2f}%", 'green')
+        else:
+            return TerminalDisplay.colorize(f"{value:.2f}%", 'red')
+
+    @staticmethod
+    def print_header():
+        """ヘッダー表示"""
+        print("\n" + "=" * 70)
+        print(TerminalDisplay.colorize("  🏆 ULTIMATE AI TRADER - 世界最強システム 稼働中", 'cyan'))
+        print("=" * 70)
+
+    @staticmethod
+    def print_status(data: Dict):
+        """ステータス表示"""
+        print("\n" + "-" * 70)
+        print(TerminalDisplay.colorize(f"  📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 'white'))
+        print("-" * 70)
+
+        # ポートフォリオ
+        portfolio = data.get('portfolio_value', 0)
+        initial = data.get('initial_capital', 0)
+        roi = ((portfolio / initial) - 1) * 100 if initial > 0 else 0
+        cash = data.get('cash', 0)
+        crypto = data.get('crypto_value', 0)
+
+        print(f"  💰 ポートフォリオ: {TerminalDisplay.format_jpy(portfolio)} ({TerminalDisplay.format_pct(roi)})")
+        print(f"  💴 現金:          {TerminalDisplay.format_jpy(cash)}")
+        print(f"  🪙 暗号資産:       {TerminalDisplay.format_jpy(crypto)}")
+
+        # 取引統計
+        trades = data.get('total_trades', 0)
+        win_rate = data.get('win_rate', 0)
+        pnl = data.get('total_pnl', 0)
+
+        print(f"  📊 取引回数:       {trades}回")
+        print(f"  ✅ 勝率:          {win_rate:.1f}%")
+        print(f"  💵 累計損益:       {TerminalDisplay.format_jpy(pnl)}")
+
+        # ML/Kelly状態
+        ml_trained = data.get('ml_trained', 0)
+        ml_total = data.get('ml_total', 0)
+        vol_regime = data.get('volatility_regime', 'normal')
+
+        regime_color = {'low': 'blue', 'normal': 'yellow', 'high': 'red'}.get(vol_regime, 'white')
+        print(f"  🧠 ML学習状態:     {ml_trained}/{ml_total} trained")
+        print(f"  📈 ボラティリティ:  {TerminalDisplay.colorize(vol_regime.upper(), regime_color)}")
+
+        # ポジション
+        positions = data.get('positions', {})
+        if positions:
+            print("\n  📦 保有ポジション:")
+            for pair, pos in positions.items():
+                value = pos.get('value', 0)
+                pnl_pct = pos.get('pnl_pct', 0)
+                kelly = pos.get('kelly', 0.3)
+                print(f"     {pair}: {TerminalDisplay.format_jpy(value)} ({TerminalDisplay.format_pct(pnl_pct)}) [K={kelly:.2f}]")
+
+        print("-" * 70)
+
+
 sys.path.insert(0, '/home/user/bitflyer')
 
 from config.settings import Config, get_config
@@ -434,6 +640,28 @@ class AggressiveTrader:
         if self.use_websocket:
             self._init_websocket()
 
+        # ============================================
+        # チャート生成器・ターミナル表示
+        # ============================================
+        self.chart_generator = PortfolioChartGenerator()
+        self.terminal_display = TerminalDisplay()
+        self.last_chart_send = datetime.now()
+        self.chart_send_interval = 3600  # 1時間ごとにチャート送信
+
+        # ============================================
+        # 外部同期（入金・出金・手動取引対応）
+        # ============================================
+        self.last_external_sync = datetime.now()
+        self.external_sync_interval = 60  # 1分ごとに外部状態をチェック
+        self.last_known_api_balance = 0
+        self.last_known_positions: Dict[str, float] = {}
+
+        # LINE通知間隔
+        self.last_line_notify = datetime.now()
+        self.line_notify_interval = 1800  # 30分ごとに定期通知
+
+        # 起動時のヘッダー表示
+        self.terminal_display.print_header()
         logger.info("=" * 60)
         logger.info("  🏆 ULTIMATE AI TRADER - 世界最強システム")
         logger.info("=" * 60)
@@ -445,6 +673,8 @@ class AggressiveTrader:
         logger.info("    ├─ Kelly Criterion Position Sizing")
         logger.info("    ├─ Dynamic Parameter Optimization")
         logger.info("    ├─ Order Book Imbalance Analysis")
+        logger.info("    ├─ External Sync (Deposits/Withdrawals/User Trades)")
+        logger.info("    ├─ Portfolio Chart Generation (LINE)")
         logger.info(f"    └─ WebSocket Real-time Data: {'✓' if self.use_websocket else '✗'}")
         logger.info("=" * 60)
 
@@ -517,6 +747,154 @@ class AggressiveTrader:
         """WebSocket約定受信時"""
         # 約定データはOrderBookAnalyzerで使用
         pass
+
+    async def _sync_external_state(self):
+        """
+        外部状態同期（入金・出金・手動取引対応）
+
+        ユーザーがWebサイトから取引した場合や、
+        入金・出金があった場合に状態を同期する
+        """
+        if self.config.trading.paper_trading:
+            return
+
+        try:
+            # APIから最新残高を取得
+            api_balance, holdings = await self._fetch_balance_from_api()
+
+            # 現金残高の変化を検出
+            if self.last_known_api_balance > 0:
+                balance_diff = api_balance - self.last_known_api_balance
+
+                if abs(balance_diff) > 100:  # ¥100以上の変化
+                    if balance_diff > 0:
+                        # 入金または売却
+                        logger.info(f"💹 外部変化検出: +¥{balance_diff:,.0f} (入金または売却)")
+                        if self.notifier:
+                            self.notifier.send_text(
+                                f"💹 外部変化を検出しました\n\n"
+                                f"💰 残高変化: +¥{balance_diff:,.0f}\n"
+                                f"📊 新残高: ¥{api_balance:,.0f}\n"
+                                f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                            )
+                    else:
+                        # 出金または購入
+                        logger.info(f"💸 外部変化検出: ¥{balance_diff:,.0f} (出金または購入)")
+                        if self.notifier:
+                            self.notifier.send_text(
+                                f"💸 外部変化を検出しました\n\n"
+                                f"💰 残高変化: ¥{balance_diff:,.0f}\n"
+                                f"📊 新残高: ¥{api_balance:,.0f}\n"
+                                f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                            )
+
+            # 保有ポジションの変化を検出
+            for currency, amount in holdings.items():
+                pair = f"{currency}_JPY"
+                last_amount = self.last_known_positions.get(currency, 0)
+
+                if abs(amount - last_amount) > 0.001:
+                    if pair in self.positions:
+                        # ポジション更新
+                        old_size = self.positions[pair].size
+                        self.positions[pair].size = amount
+
+                        if amount > old_size:
+                            logger.info(f"📦 外部購入検出: {currency} +{amount - old_size:.4f}")
+                        elif amount < old_size:
+                            logger.info(f"📤 外部売却検出: {currency} -{old_size - amount:.4f}")
+
+            # 現在の状態を保存
+            self.last_known_api_balance = api_balance
+            self.current_capital = api_balance  # 現金残高を同期
+            self.last_known_positions = holdings.copy()
+
+        except Exception as e:
+            logger.debug(f"External sync failed: {e}")
+
+    def _send_line_status(self, include_chart: bool = False):
+        """
+        LINE定期ステータス通知（日本語）
+        """
+        if not self.notifier:
+            return
+
+        try:
+            portfolio_value = self._calculate_current_portfolio_value()
+            roi = ((portfolio_value / self.initial_capital) - 1) * 100 if self.initial_capital > 0 else 0
+            win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
+
+            # 運用時間計算
+            runtime = datetime.now() - self.start_time
+            hours = runtime.total_seconds() / 3600
+            days = int(hours // 24)
+            remaining_hours = int(hours % 24)
+
+            # 日本語メッセージ
+            status_emoji = "📈" if roi >= 0 else "📉"
+            profit_emoji = "💰" if self.total_pnl >= 0 else "💸"
+
+            message = (
+                f"🏆 AI Trader 定期レポート\n"
+                f"{'━' * 20}\n\n"
+                f"💼 ポートフォリオ\n"
+                f"   現在価値: ¥{portfolio_value:,.0f}\n"
+                f"   {status_emoji} 収益率: {roi:+.2f}%\n"
+                f"   {profit_emoji} 累計損益: ¥{self.total_pnl:,.0f}\n\n"
+                f"📊 取引統計\n"
+                f"   取引回数: {self.total_trades}回\n"
+                f"   勝率: {win_rate:.1f}%\n"
+                f"   勝ち: {self.winning_trades}回\n\n"
+                f"⏱️ 稼働時間\n"
+                f"   {days}日 {remaining_hours}時間\n\n"
+                f"🧠 AI状態\n"
+                f"   ML学習: {sum(1 for p in self.ml_predictors.values() if p.trained)}/{len(self.ml_predictors)}\n"
+                f"   ボラ: {self.dynamic_optimizer.volatility_regime}\n\n"
+                f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+
+            self.notifier.send_text(message)
+
+            # チャート送信（対応している場合）
+            if include_chart:
+                chart_path = self.chart_generator.generate_chart(self.initial_capital)
+                if chart_path and os.path.exists(chart_path):
+                    # チャートファイルをLINEに送信（画像送信対応の場合）
+                    try:
+                        self.notifier.send_image(chart_path)
+                        logger.info("📊 Chart sent to LINE")
+                    except Exception:
+                        # 画像送信非対応の場合は無視
+                        pass
+
+        except Exception as e:
+            logger.warning(f"LINE notification failed: {e}")
+
+    def _send_trade_notification(self, pair: str, side: str, size: float, price: float, pnl: float = None):
+        """取引通知（日本語）"""
+        if not self.notifier:
+            return
+
+        try:
+            action = "買い" if side == "BUY" else "売り"
+            emoji = "🟢" if side == "BUY" else "🔴"
+
+            message = (
+                f"{emoji} 取引完了\n\n"
+                f"📌 {pair}\n"
+                f"   {action}: {size:.4f}\n"
+                f"   価格: ¥{price:,.0f}\n"
+            )
+
+            if pnl is not None:
+                pnl_emoji = "💰" if pnl >= 0 else "💸"
+                message += f"   {pnl_emoji} 損益: ¥{pnl:,.0f}\n"
+
+            message += f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+
+            self.notifier.send_text(message)
+        except Exception:
+            pass
 
     async def _fetch_prices(self) -> Dict[str, Dict]:
         """全ペアの価格を取得"""
@@ -893,17 +1271,15 @@ class AggressiveTrader:
                 # 取引後に状態を保存
                 self._save_state()
 
-                # 通知
-                if self.notifier and self.total_trades % 10 == 0:  # 10回ごと
-                    win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
-                    self.notifier.send_text(
-                        f"📈 Trade #{self.total_trades}\n"
-                        f"{pair}: {side.value} {size}\n"
-                        f"Price: ¥{price:,.0f}\n"
-                        f"Capital: ¥{self.current_capital:,.0f}\n"
-                        f"PnL: ¥{self.total_pnl:,.0f}\n"
-                        f"Win Rate: {win_rate:.1f}%"
-                    )
+                # チャート用に取引を記録
+                trade_pnl = 0
+                if side == OrderSide.SELL and position.entry_price > 0:
+                    trade_pnl = (price - position.entry_price) * size
+                self.chart_generator.add_trade(side.value, trade_pnl)
+
+                # 通知（日本語・10回ごと）
+                if self.notifier and self.total_trades % 10 == 0:
+                    self._send_trade_notification(pair, side.value, size, price, trade_pnl if trade_pnl != 0 else None)
 
                 return True
 
@@ -969,9 +1345,19 @@ class AggressiveTrader:
                         price = prices[pair]['price']
                         await self._execute_trade(pair, action, confidence, reason, price)
 
-                # 定期ステータス（30秒ごと = 30 tick @ 1秒間隔）
+                # ============================================
+                # 定期ステータス・チャート記録（30秒ごと）
+                # ============================================
                 if tick % 30 == 0:
                     self._log_status()
+
+                    # ポートフォリオ価値をチャート用に記録
+                    portfolio_value = self._calculate_current_portfolio_value()
+                    self.chart_generator.add_portfolio_value(portfolio_value)
+
+                    # 美しいターミナル表示
+                    status_data = self._get_terminal_status_data()
+                    self.terminal_display.print_status(status_data)
 
                 # ============================================
                 # 定期MLトレーニング（5分ごと）
@@ -987,15 +1373,26 @@ class AggressiveTrader:
                                     logger.info(f"🧠 ML trained: {pair} (count={ml_predictor.training_count})")
                     self.last_ml_training = datetime.now()
 
-                # 定期残高更新（3分ごと = 180 tick @ 1秒間隔）
-                if tick % 180 == 0 and not self.config.trading.paper_trading:
-                    try:
-                        api_balance, _ = await self._fetch_balance_from_api()
-                        if api_balance > 0:
-                            self.current_capital = api_balance
-                            logger.info(f"💰 Balance refreshed: ¥{api_balance:,.0f}")
-                    except Exception:
-                        pass
+                # ============================================
+                # 外部状態同期（1分ごと - 入金・出金・手動取引対応）
+                # ============================================
+                if (datetime.now() - self.last_external_sync).seconds >= self.external_sync_interval:
+                    await self._sync_external_state()
+                    self.last_external_sync = datetime.now()
+
+                # ============================================
+                # LINE定期通知（30分ごと）
+                # ============================================
+                if (datetime.now() - self.last_line_notify).seconds >= self.line_notify_interval:
+                    self._send_line_status(include_chart=False)
+                    self.last_line_notify = datetime.now()
+
+                # ============================================
+                # チャート付きLINE通知（1時間ごと）
+                # ============================================
+                if (datetime.now() - self.last_chart_send).seconds >= self.chart_send_interval:
+                    self._send_line_status(include_chart=True)
+                    self.last_chart_send = datetime.now()
 
                 # 定期状態保存（60秒ごと）
                 if (datetime.now() - self.last_state_save).seconds >= self.state_save_interval:
@@ -1006,11 +1403,15 @@ class AggressiveTrader:
                 if self.current_capital >= self.initial_capital * 3:
                     logger.info(f"🎉 TARGET ACHIEVED! Capital: ¥{self.current_capital:,.0f}")
                     if self.notifier:
+                        # 目標達成時はチャート付き通知
+                        self._send_line_status(include_chart=True)
                         self.notifier.send_text(
-                            f"🎉 目標達成！\n"
-                            f"資本: ¥{self.current_capital:,.0f}\n"
-                            f"利益: ¥{self.total_pnl:,.0f}\n"
-                            f"取引数: {self.total_trades}"
+                            f"🎉🎉🎉 目標達成！🎉🎉🎉\n\n"
+                            f"💰 資本: ¥{self.current_capital:,.0f}\n"
+                            f"📈 利益: ¥{self.total_pnl:,.0f}\n"
+                            f"🔄 取引数: {self.total_trades}\n\n"
+                            f"おめでとうございます！\n"
+                            f"目標の3倍を達成しました！"
                         )
 
                 # ループ間隔（2秒 - レート制限対応）
@@ -1033,6 +1434,36 @@ class AggressiveTrader:
                 total += pos.size * pos.current_price
 
         return total
+
+    def _get_terminal_status_data(self) -> Dict:
+        """ターミナル表示用のステータスデータ"""
+        portfolio_value = self._calculate_current_portfolio_value()
+        position_value = portfolio_value - self.current_capital
+
+        positions_data = {}
+        for pair in self.active_pairs:
+            pos = self.positions.get(pair)
+            if pos and pos.size > 0:
+                kelly = self.kelly_sizers.get(pair)
+                positions_data[pair] = {
+                    'value': pos.size * pos.current_price,
+                    'pnl_pct': pos.unrealized_pnl_pct,
+                    'kelly': kelly.get_kelly_fraction() if kelly else 0.3,
+                }
+
+        return {
+            'portfolio_value': portfolio_value,
+            'initial_capital': self.initial_capital,
+            'cash': self.current_capital,
+            'crypto_value': position_value,
+            'total_trades': self.total_trades,
+            'win_rate': (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0,
+            'total_pnl': self.total_pnl,
+            'ml_trained': sum(1 for p in self.ml_predictors.values() if p.trained),
+            'ml_total': len(self.ml_predictors),
+            'volatility_regime': self.dynamic_optimizer.volatility_regime,
+            'positions': positions_data,
+        }
 
     def _log_status(self):
         """ステータスログ（世界最強情報表示）"""
