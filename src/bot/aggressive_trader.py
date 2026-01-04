@@ -1674,20 +1674,39 @@ class AggressiveTrader:
 
                 # 価格取得（順次取得でレート制限回避）
                 prices = {}
+
+                # ペア別の現実的な価格範囲（異常値検出用）
+                PRICE_RANGES = {
+                    "BTC_JPY": (1000000, 20000000),   # ¥1M - ¥20M
+                    "ETH_JPY": (50000, 1000000),      # ¥50K - ¥1M
+                    "XRP_JPY": (10, 500),             # ¥10 - ¥500
+                    "XLM_JPY": (5, 200),              # ¥5 - ¥200
+                    "MONA_JPY": (10, 500),            # ¥10 - ¥500
+                }
+
                 for pair in self.active_pairs:
                     try:
                         if pair in self.clients:
                             ticker = await self.clients[pair].get_ticker()
                             if ticker:
+                                price = ticker.ltp
+
+                                # 価格妥当性チェック
+                                price_range = PRICE_RANGES.get(pair, (1, 100000000))
+                                if not (price_range[0] <= price <= price_range[1]):
+                                    logger.warning(f"⚠️ Abnormal price detected: {pair} = ¥{price:,.0f} (expected: ¥{price_range[0]:,.0f} - ¥{price_range[1]:,.0f})")
+                                    # 異常価格は無視
+                                    continue
+
                                 prices[pair] = {
-                                    'price': ticker.ltp,
+                                    'price': price,
                                     'bid': ticker.best_bid,
                                     'ask': ticker.best_ask,
                                     'spread': ticker.spread,
                                     'volume': ticker.volume,
                                 }
-                                self.price_history[pair].add(ticker.ltp, ticker.volume)
-                                self.positions[pair].update(ticker.ltp)
+                                self.price_history[pair].add(price, ticker.volume)
+                                self.positions[pair].update(price)
                         await asyncio.sleep(0.15)  # 超高速API間隔（150ms）
                     except Exception as e:
                         if "429" in str(e) or "rate" in str(e).lower():

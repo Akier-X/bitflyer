@@ -670,6 +670,17 @@ class MockBitFlyerClient(BitFlyerClient):
     Paper Tradingやテスト用
     """
 
+    # ペア別の現実的な価格（2024年相場）
+    MOCK_BASE_PRICES = {
+        "BTC_JPY": 5000000,    # ¥5,000,000
+        "ETH_JPY": 350000,     # ¥350,000
+        "XRP_JPY": 80,         # ¥80
+        "XLM_JPY": 50,         # ¥50
+        "MONA_JPY": 60,        # ¥60
+        "BCH_JPY": 30000,      # ¥30,000
+        "LTC_JPY": 10000,      # ¥10,000
+    }
+
     def __init__(self, initial_balance: float = 1000000, **kwargs):
         super().__init__(**kwargs)
 
@@ -679,24 +690,31 @@ class MockBitFlyerClient(BitFlyerClient):
         }
         self.mock_positions = []
         self.mock_orders = {}
-        self.mock_price = 5000000  # Initial BTC price
 
-        logger.info("Mock BitFlyer client initialized")
+        # ペアに応じた現実的な価格を設定
+        self.mock_price = self.MOCK_BASE_PRICES.get(self.product_code, 5000000)
+
+        logger.info(f"Mock BitFlyer client initialized for {self.product_code} @ ¥{self.mock_price:,.0f}")
 
     async def get_ticker(self, product_code: str = None) -> Optional[Ticker]:
         """モックティッカー"""
-        # Simulate price movement
         import random
-        self.mock_price *= 1 + random.uniform(-0.001, 0.001)
+
+        # 正しいペアの価格を使用
+        pc = product_code or self.product_code
+        base_price = self.MOCK_BASE_PRICES.get(pc, self.mock_price)
+
+        # Simulate price movement (±0.1%)
+        price = base_price * (1 + random.uniform(-0.001, 0.001))
 
         self.ticker = Ticker(
-            product_code=product_code or self.product_code,
+            product_code=pc,
             timestamp=datetime.now(),
-            best_bid=self.mock_price * 0.9999,
-            best_ask=self.mock_price * 1.0001,
+            best_bid=price * 0.9999,
+            best_ask=price * 1.0001,
             best_bid_size=1.0,
             best_ask_size=1.0,
-            ltp=self.mock_price,
+            ltp=price,
             volume=100,
             volume_by_product=100,
         )
