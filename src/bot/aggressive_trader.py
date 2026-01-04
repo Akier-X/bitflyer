@@ -289,6 +289,9 @@ class AggressiveTrader:
         confidence = 0.0
         reasons = []
 
+        # ポジション取得（早期に取得）
+        position = self.positions.get(pair)
+
         # === 超攻撃的シグナル生成（世界最強設定） ===
 
         # 1. モメンタムシグナル（超高感度）
@@ -353,8 +356,7 @@ class AggressiveTrader:
                 confidence += 0.2
                 reasons.append("scalp_entry")
 
-        # ポジションチェック
-        position = self.positions.get(pair)
+        # ポジションチェック（利確・損切り）
         if position and position.size != 0:
             # 利確チェック
             if position.unrealized_pnl_pct >= self.TAKE_PROFIT_PCT:
