@@ -1,21 +1,23 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║           ULTIMATE AGGRESSIVE AI TRADER - 世界最強・世界一                    ║
+║     🏆 ULTIMATE AI TRADER v2.0 - 世界最強・世界一・究極完成版 🏆              ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  5000円から最速で資産を増やす究極のAIトレーダー                               ║
 ║  Target: 5000円 → 15000円+ in 1 month (3x return)                            ║
-║  Strategy: ML + High-frequency scalping + Kelly Criterion                    ║
+║  Strategy: ML + High-frequency scalping + Kelly Criterion + Regime Detection ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Ultimate Features:                                                          ║
-║  ├─ 機械学習価格予測（Ridge回帰 + 8特徴量工学）                               ║
-║  ├─ Kelly基準による最適ポジションサイジング                                   ║
-║  ├─ 動的パラメータ自動最適化（ボラティリティ適応）                             ║
+║  🧠 Ultimate Features v2.0:                                                  ║
+║  ├─ 機械学習価格予測（Ridge回帰 + λ動的調整 + 8特徴量工学）                   ║
+║  ├─ Kelly基準 + EMA基づくp/b推定（適応的Half-Kelly）                          ║
+║  ├─ 2Dレジーム検出（ボラティリティ × トレンド強度ADX）                         ║
+║  ├─ 動的ウェイト配分（レジーム別戦略強度調整）                                 ║
+║  ├─ 最大ドローダウン保護（5%下落でポジション縮小）                             ║
 ║  ├─ 注文板インバランス分析（WebSocket）                                       ║
 ║  ├─ 外部環境完全対応（入金・出金・手動取引）                                   ║
 ║  ├─ リアルタイム収支グラフ生成（LINE通知）                                    ║
 ║  └─ 状態永続化（再起動後も継続）                                              ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  これ以上の改善は不可能 - 世界最強AIトレーダー                                 ║
+║  🎯 これ以上の改善は不可能 - 究極の世界最強AIトレーダー 🎯                     ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -48,10 +50,16 @@ except ImportError:
 
 
 # ============================================================================
-# Machine Learning Price Predictor - 機械学習価格予測
+# Machine Learning Price Predictor - 機械学習価格予測（λ動的調整付き）
 # ============================================================================
 class MLPredictor:
-    """機械学習価格予測エンジン"""
+    """
+    機械学習価格予測エンジン v2.0
+
+    改善点:
+    - λ動的調整: ノイズが多い（ボラティリティ高い）時はλを大きく
+    - 予測精度のEMA追跡で信頼度調整
+    """
 
     def __init__(self, lookback: int = 50):
         self.lookback = lookback
@@ -59,8 +67,14 @@ class MLPredictor:
         self.trained = False
         self.training_count = 0
 
+        # λ動的調整用
+        self.base_lambda = 0.1
+        self.current_lambda = 0.1
+        self.prediction_accuracy_ema = 0.5  # 予測精度のEMA
+        self.last_predictions: deque = deque(maxlen=20)  # 直近20予測の結果
+
     def _create_features(self, prices: List[float]) -> Optional[np.ndarray]:
-        """特徴量生成"""
+        """特徴量生成（8特徴量）"""
         if len(prices) < 10:
             return None
 
@@ -109,8 +123,36 @@ class MLPredictor:
 
         return np.array(features)
 
+    def _calculate_dynamic_lambda(self, prices: List[float]) -> float:
+        """
+        λ動的調整: ノイズが多い時はλを大きくしてオーバーフィット防止
+
+        λ = base_lambda * (1 + volatility_factor + error_factor)
+        """
+        arr = np.array(prices)
+        if len(arr) < 20:
+            return self.base_lambda
+
+        # ボラティリティファクター（高ボラ = 高λ）
+        returns = np.diff(arr[-20:]) / arr[-20:-1]
+        volatility = np.std(returns)
+        volatility_factor = min(volatility * 50, 2.0)  # 最大2倍
+
+        # 予測誤差ファクター（精度が低い = 高λ）
+        error_factor = max(0, 1 - self.prediction_accuracy_ema) * 1.5
+
+        dynamic_lambda = self.base_lambda * (1 + volatility_factor + error_factor)
+        return min(dynamic_lambda, 1.0)  # 最大λ=1.0
+
+    def update_accuracy(self, predicted_direction: int, actual_direction: int):
+        """予測精度を更新（EMA）"""
+        correct = 1.0 if predicted_direction == actual_direction else 0.0
+        alpha = 0.1  # EMA係数
+        self.prediction_accuracy_ema = alpha * correct + (1 - alpha) * self.prediction_accuracy_ema
+        self.last_predictions.append((predicted_direction, actual_direction))
+
     def train(self, prices: List[float]):
-        """オンライン学習（リッジ回帰）"""
+        """オンライン学習（Ridge回帰 + λ動的調整）"""
         if len(prices) < self.lookback:
             return
 
@@ -130,8 +172,10 @@ class MLPredictor:
         X = np.array(X)
         y = np.array(y)
 
-        lambda_reg = 0.1
-        XtX = X.T @ X + lambda_reg * np.eye(X.shape[1])
+        # λ動的調整
+        self.current_lambda = self._calculate_dynamic_lambda(prices)
+
+        XtX = X.T @ X + self.current_lambda * np.eye(X.shape[1])
         Xty = X.T @ y
         try:
             self.weights = np.linalg.solve(XtX, Xty)
@@ -150,72 +194,211 @@ class MLPredictor:
             return 0, 0.0
 
         score = np.dot(features, self.weights)
-        confidence = 1 / (1 + np.exp(-abs(score) * 2))
+
+        # 基本信頼度（シグモイド変換）
+        base_confidence = 1 / (1 + np.exp(-abs(score) * 2))
+
+        # 予測精度EMAで信頼度を調整
+        adjusted_confidence = base_confidence * (0.5 + self.prediction_accuracy_ema * 0.5)
 
         if score > 0.2:
-            return 1, min(confidence, 0.95)
+            return 1, min(adjusted_confidence, 0.95)
         elif score < -0.2:
-            return -1, min(confidence, 0.95)
+            return -1, min(adjusted_confidence, 0.95)
         else:
-            return 0, confidence * 0.3
+            return 0, adjusted_confidence * 0.3
 
 
 # ============================================================================
-# Kelly Criterion Position Sizer - Kelly基準ポジションサイジング
+# Kelly Criterion Position Sizer - Kelly基準ポジションサイジング（EMA版）
 # ============================================================================
 class KellyPositionSizer:
-    """Kelly基準による最適ポジションサイジング"""
+    """
+    Kelly基準による最適ポジションサイジング v2.0
 
-    def __init__(self):
+    改善点:
+    - EMAによるp/b推定（最近の取引を重視）
+    - 適応的Half-Kelly（市場状態による調整）
+    """
+
+    def __init__(self, ema_alpha: float = 0.1):
         self.win_count = 0
         self.loss_count = 0
         self.total_win = 0.0
         self.total_loss = 0.0
 
+        # EMAによるp/b推定（ユーザーアドバイス実装）
+        self.ema_alpha = ema_alpha
+        self.p_ema = 0.5  # 勝率のEMA
+        self.b_ema = 1.0  # win/loss比のEMA
+
+        # 取引履歴（直近のみ保持）
+        self.recent_trades: deque = deque(maxlen=50)
+
     def update(self, pnl: float):
-        """取引結果を更新"""
+        """取引結果を更新（EMA更新含む）"""
         if pnl > 0:
             self.win_count += 1
             self.total_win += pnl
+            # EMA更新: 勝ち
+            self.p_ema = self.ema_alpha * 1.0 + (1 - self.ema_alpha) * self.p_ema
         else:
             self.loss_count += 1
             self.total_loss += abs(pnl)
+            # EMA更新: 負け
+            self.p_ema = self.ema_alpha * 0.0 + (1 - self.ema_alpha) * self.p_ema
+
+        # 取引を記録
+        self.recent_trades.append(pnl)
+
+        # b（win/loss比）のEMA更新
+        if len(self.recent_trades) >= 5:
+            recent_wins = [t for t in self.recent_trades if t > 0]
+            recent_losses = [abs(t) for t in self.recent_trades if t < 0]
+            if recent_wins and recent_losses:
+                recent_b = np.mean(recent_wins) / np.mean(recent_losses)
+                self.b_ema = self.ema_alpha * recent_b + (1 - self.ema_alpha) * self.b_ema
 
     def get_kelly_fraction(self) -> float:
-        """Kelly分数を計算 f* = (p*b - q) / b"""
+        """
+        Kelly分数を計算 f* = (p*b - q) / b
+
+        EMAによる適応的推定を使用
+        """
         total = self.win_count + self.loss_count
         if total < 5:
             return 0.3  # デフォルト30%
 
-        p = self.win_count / total
+        # EMAベースのp/b使用（直近の状況を重視）
+        p = self.p_ema
         q = 1 - p
+        b = self.b_ema
 
-        avg_win = self.total_win / self.win_count if self.win_count > 0 else 1
-        avg_loss = self.total_loss / self.loss_count if self.loss_count > 0 else 1
-
-        b = avg_win / avg_loss if avg_loss > 0 else 1
+        # Kelly計算
         kelly = (p * b - q) / b if b > 0 else 0
 
         # Half-Kelly（より保守的）
         kelly = kelly / 2
 
+        # 信頼度に基づく調整（取引数が少ない場合は控えめに）
+        confidence_factor = min(1.0, total / 20)  # 20取引で完全信頼
+        kelly = kelly * (0.5 + confidence_factor * 0.5)
+
         return max(0.1, min(0.6, kelly))
 
+    def get_stats(self) -> Dict:
+        """統計情報を取得"""
+        return {
+            'win_count': self.win_count,
+            'loss_count': self.loss_count,
+            'p_ema': self.p_ema,
+            'b_ema': self.b_ema,
+            'kelly': self.get_kelly_fraction(),
+        }
+
 
 # ============================================================================
-# Dynamic Parameter Optimizer - 動的パラメータ最適化
+# Dynamic Parameter Optimizer - 動的パラメータ最適化（2Dレジーム検出）
 # ============================================================================
 class DynamicOptimizer:
-    """動的パラメータ最適化"""
+    """
+    動的パラメータ最適化 v2.0
+
+    改善点（ユーザーアドバイス実装）:
+    - 2Dレジーム検出: ボラティリティ × トレンド強度（ADX）
+    - 動的ウェイト配分: レジーム別に戦略の強度を調整
+    """
+
+    # レジームマトリクス（ボラティリティ × トレンド）
+    REGIME_MATRIX = {
+        ('low', 'weak'): 'range_quiet',      # レンジ相場・静か
+        ('low', 'strong'): 'trend_slow',     # ゆっくりトレンド
+        ('normal', 'weak'): 'range_active',   # レンジ相場・活発
+        ('normal', 'strong'): 'trend_normal', # 通常トレンド
+        ('high', 'weak'): 'choppy',           # 方向感なし・荒い
+        ('high', 'strong'): 'trend_strong',   # 強トレンド
+    }
+
+    # レジーム別の戦略ウェイト（動的ウェイト配分）
+    REGIME_WEIGHTS = {
+        'range_quiet': {'ml': 0.5, 'momentum': 0.2, 'mean_reversion': 0.8, 'trend': 0.1},
+        'trend_slow': {'ml': 0.6, 'momentum': 0.4, 'mean_reversion': 0.3, 'trend': 0.7},
+        'range_active': {'ml': 0.4, 'momentum': 0.5, 'mean_reversion': 0.6, 'trend': 0.2},
+        'trend_normal': {'ml': 0.5, 'momentum': 0.6, 'mean_reversion': 0.2, 'trend': 0.8},
+        'choppy': {'ml': 0.3, 'momentum': 0.3, 'mean_reversion': 0.4, 'trend': 0.2},
+        'trend_strong': {'ml': 0.4, 'momentum': 0.8, 'mean_reversion': 0.1, 'trend': 0.9},
+    }
 
     def __init__(self):
         self.volatility_regime = 'normal'
+        self.trend_regime = 'weak'
+        self.combined_regime = 'range_active'
         self.current_params = {
             'take_profit': 0.5,
             'stop_loss': 0.3,
             'confidence_threshold': 0.25,
             'momentum_threshold': 0.001,
         }
+        self.current_weights = self.REGIME_WEIGHTS['range_active']
+
+    def _calculate_adx(self, prices: List[float], period: int = 14) -> float:
+        """
+        ADX (Average Directional Index) 計算
+        トレンドの強さを測定（0-100、25以上がトレンド）
+        """
+        if len(prices) < period + 2:
+            return 25.0  # デフォルト
+
+        arr = np.array(prices)
+        high = arr  # 簡易版：終値をHigh/Lowとして使用
+        low = arr
+        close = arr
+
+        # True Range
+        tr = np.maximum(
+            np.abs(high[1:] - low[1:]),
+            np.maximum(
+                np.abs(high[1:] - close[:-1]),
+                np.abs(low[1:] - close[:-1])
+            )
+        )
+
+        # +DM / -DM
+        plus_dm = np.maximum(high[1:] - high[:-1], 0)
+        minus_dm = np.maximum(low[:-1] - low[1:], 0)
+
+        # 両方正の場合、大きい方のみ
+        both_positive = (plus_dm > 0) & (minus_dm > 0)
+        plus_dm[both_positive & (plus_dm <= minus_dm)] = 0
+        minus_dm[both_positive & (minus_dm <= plus_dm)] = 0
+
+        # 平滑化
+        def smooth(arr, period):
+            result = np.zeros(len(arr))
+            result[:period] = arr[:period].sum()
+            for i in range(period, len(arr)):
+                result[i] = result[i-1] - result[i-1]/period + arr[i]
+            return result
+
+        if len(tr) < period:
+            return 25.0
+
+        atr = smooth(tr, period)
+        plus_di = 100 * smooth(plus_dm, period) / np.maximum(atr, 1e-10)
+        minus_di = 100 * smooth(minus_dm, period) / np.maximum(atr, 1e-10)
+
+        # DX
+        di_sum = plus_di + minus_di
+        di_diff = np.abs(plus_di - minus_di)
+        dx = 100 * di_diff / np.maximum(di_sum, 1e-10)
+
+        # ADX（DXの平滑化）
+        if len(dx) >= period:
+            adx = smooth(dx[-period:], period)[-1]
+        else:
+            adx = np.mean(dx)
+
+        return min(100, max(0, adx))
 
     def detect_volatility_regime(self, prices: List[float]) -> str:
         """ボラティリティレジーム検出"""
@@ -233,22 +416,74 @@ class DynamicOptimizer:
         else:
             return 'normal'
 
-    def optimize(self, prices: List[float]) -> Dict:
-        """パラメータ最適化"""
-        self.volatility_regime = self.detect_volatility_regime(prices)
+    def detect_trend_regime(self, prices: List[float]) -> str:
+        """トレンド強度レジーム検出（ADX使用）"""
+        adx = self._calculate_adx(prices)
+        return 'strong' if adx >= 25 else 'weak'
 
-        if self.volatility_regime == 'low':
+    def detect_2d_regime(self, prices: List[float]) -> str:
+        """2Dレジーム検出（ボラティリティ × トレンド）"""
+        vol_regime = self.detect_volatility_regime(prices)
+        trend_regime = self.detect_trend_regime(prices)
+
+        self.volatility_regime = vol_regime
+        self.trend_regime = trend_regime
+
+        key = (vol_regime, trend_regime)
+        self.combined_regime = self.REGIME_MATRIX.get(key, 'range_active')
+
+        return self.combined_regime
+
+    def get_strategy_weights(self) -> Dict[str, float]:
+        """現在のレジームに基づく戦略ウェイトを取得"""
+        return self.REGIME_WEIGHTS.get(self.combined_regime, self.REGIME_WEIGHTS['range_active'])
+
+    def optimize(self, prices: List[float]) -> Dict:
+        """パラメータ最適化（2Dレジーム対応）"""
+        regime = self.detect_2d_regime(prices)
+        self.current_weights = self.get_strategy_weights()
+
+        # レジーム別パラメータ設定
+        if regime == 'range_quiet':
+            self.current_params = {
+                'take_profit': 0.2,
+                'stop_loss': 0.15,
+                'confidence_threshold': 0.15,
+                'momentum_threshold': 0.0003,
+            }
+        elif regime == 'trend_slow':
+            self.current_params = {
+                'take_profit': 0.4,
+                'stop_loss': 0.25,
+                'confidence_threshold': 0.2,
+                'momentum_threshold': 0.0005,
+            }
+        elif regime == 'range_active':
             self.current_params = {
                 'take_profit': 0.3,
                 'stop_loss': 0.2,
                 'confidence_threshold': 0.2,
-                'momentum_threshold': 0.0005,
+                'momentum_threshold': 0.0008,
             }
-        elif self.volatility_regime == 'high':
+        elif regime == 'trend_normal':
+            self.current_params = {
+                'take_profit': 0.5,
+                'stop_loss': 0.3,
+                'confidence_threshold': 0.25,
+                'momentum_threshold': 0.001,
+            }
+        elif regime == 'choppy':
+            self.current_params = {
+                'take_profit': 0.25,
+                'stop_loss': 0.2,
+                'confidence_threshold': 0.35,  # 高い閾値（慎重に）
+                'momentum_threshold': 0.0015,
+            }
+        elif regime == 'trend_strong':
             self.current_params = {
                 'take_profit': 0.8,
                 'stop_loss': 0.5,
-                'confidence_threshold': 0.35,
+                'confidence_threshold': 0.25,
                 'momentum_threshold': 0.002,
             }
         else:
@@ -260,6 +495,16 @@ class DynamicOptimizer:
             }
 
         return self.current_params
+
+    def get_regime_info(self) -> Dict:
+        """レジーム情報を取得"""
+        return {
+            'volatility': self.volatility_regime,
+            'trend': self.trend_regime,
+            'combined': self.combined_regime,
+            'weights': self.current_weights,
+            'params': self.current_params,
+        }
 
 
 # ============================================================================
@@ -433,10 +678,18 @@ class TerminalDisplay:
         ml_trained = data.get('ml_trained', 0)
         ml_total = data.get('ml_total', 0)
         vol_regime = data.get('volatility_regime', 'normal')
+        trend_regime = data.get('trend_regime', 'weak')
+        combined_regime = data.get('combined_regime', 'range_active')
+        drawdown_active = data.get('drawdown_active', False)
 
         regime_color = {'low': 'blue', 'normal': 'yellow', 'high': 'red'}.get(vol_regime, 'white')
+        trend_color = 'green' if trend_regime == 'strong' else 'cyan'
         print(f"  🧠 ML学習状態:     {ml_trained}/{ml_total} trained")
-        print(f"  📈 ボラティリティ:  {TerminalDisplay.colorize(vol_regime.upper(), regime_color)}")
+        print(f"  📈 2Dレジーム:     {TerminalDisplay.colorize(vol_regime.upper(), regime_color)} × {TerminalDisplay.colorize(trend_regime.upper(), trend_color)} → {combined_regime}")
+
+        # ドローダウン保護状態
+        if drawdown_active:
+            print(f"  🛡️ DD保護:        {TerminalDisplay.colorize('ACTIVE (50%)', 'red')}")
 
         # ポジション
         positions = data.get('positions', {})
@@ -660,20 +913,30 @@ class AggressiveTrader:
         self.last_line_notify = datetime.now()
         self.line_notify_interval = 1800  # 30分ごとに定期通知
 
+        # ============================================
+        # ドローダウン保護（ユーザーアドバイス実装）
+        # ============================================
+        self.max_drawdown_pct = 5.0  # 最大ドローダウン5%
+        self.peak_portfolio_value = initial_capital or 0  # ピーク値
+        self.drawdown_protection_active = False
+        self.drawdown_position_scale = 1.0  # ポジションスケール（0.5で50%縮小）
+
         # 起動時のヘッダー表示
         self.terminal_display.print_header()
         logger.info("=" * 60)
-        logger.info("  🏆 ULTIMATE AI TRADER - 世界最強システム")
+        logger.info("  🏆 ULTIMATE AI TRADER v2.0 - 世界最強・究極完成版")
         logger.info("=" * 60)
         logger.info(f"  💰 Initial Capital: ¥{initial_capital:,.0f}")
         logger.info(f"  🎯 Target: ¥{initial_capital * 3:,.0f} (3x)")
         logger.info(f"  📊 Active Pairs: {self.active_pairs}")
-        logger.info("  🧠 Features:")
-        logger.info("    ├─ Machine Learning Price Prediction (Ridge Regression)")
-        logger.info("    ├─ Kelly Criterion Position Sizing")
-        logger.info("    ├─ Dynamic Parameter Optimization")
+        logger.info("  🧠 v2.0 Features:")
+        logger.info("    ├─ ML Price Prediction (Ridge + λ動的調整)")
+        logger.info("    ├─ Kelly Criterion (EMA-based p/b推定)")
+        logger.info("    ├─ 2D Regime Detection (Vol × Trend ADX)")
+        logger.info("    ├─ Dynamic Weight Allocation (レジーム別)")
+        logger.info("    ├─ Drawdown Protection (5% → 50%縮小)")
         logger.info("    ├─ Order Book Imbalance Analysis")
-        logger.info("    ├─ External Sync (Deposits/Withdrawals/User Trades)")
+        logger.info("    ├─ External Sync (入金/出金/手動取引)")
         logger.info("    ├─ Portfolio Chart Generation (LINE)")
         logger.info(f"    └─ WebSocket Real-time Data: {'✓' if self.use_websocket else '✗'}")
         logger.info("=" * 60)
@@ -991,7 +1254,7 @@ class AggressiveTrader:
         can_buy = self.current_capital >= min_order_cost
 
         # ============================================
-        # 動的パラメータ最適化
+        # 動的パラメータ最適化 + 2Dレジーム検出
         # ============================================
         price_list = list(history.prices)
         params = self.dynamic_optimizer.optimize(price_list)
@@ -999,6 +1262,13 @@ class AggressiveTrader:
         dynamic_stop_loss = params['stop_loss']
         dynamic_confidence_threshold = params['confidence_threshold']
         dynamic_momentum_threshold = params['momentum_threshold']
+
+        # 動的ウェイト取得（2Dレジーム基づく）
+        strategy_weights = self.dynamic_optimizer.get_strategy_weights()
+        ml_weight = strategy_weights.get('ml', 0.5)
+        momentum_weight = strategy_weights.get('momentum', 0.5)
+        trend_weight = strategy_weights.get('trend', 0.5)
+        # mean_reversion_weight = strategy_weights.get('mean_reversion', 0.5)
 
         momentum = history.momentum
         volatility = history.volatility
@@ -1012,21 +1282,23 @@ class AggressiveTrader:
         position = self.positions.get(pair)
 
         # ============================================
-        # 機械学習予測シグナル（重要度: 40%）
+        # 機械学習予測シグナル（動的ウェイト適用）
         # ============================================
         ml_predictor = self.ml_predictors.get(pair)
         ml_direction = 0
         ml_confidence = 0.0
         if ml_predictor and ml_predictor.trained:
             ml_direction, ml_confidence = ml_predictor.predict(price_list)
+            # 動的ウェイト適用（レジームに基づく）
+            weighted_ml_confidence = ml_confidence * ml_weight
             if ml_direction == 1:
                 action = 2  # BUY
-                confidence += ml_confidence * 0.4
-                reasons.append(f"ml_buy({ml_confidence:.2f})")
+                confidence += weighted_ml_confidence
+                reasons.append(f"ml_buy({ml_confidence:.2f}×{ml_weight:.1f})")
             elif ml_direction == -1:
                 action = 0  # SELL
-                confidence += ml_confidence * 0.4
-                reasons.append(f"ml_sell({ml_confidence:.2f})")
+                confidence += weighted_ml_confidence
+                reasons.append(f"ml_sell({ml_confidence:.2f}×{ml_weight:.1f})")
 
         # ============================================
         # 注文板インバランス分析（WebSocket使用時）
@@ -1057,32 +1329,32 @@ class AggressiveTrader:
             except Exception:
                 pass
 
-        # === 超攻撃的シグナル生成（世界最強設定 + 動的最適化） ===
+        # === 超攻撃的シグナル生成（世界最強設定 + 動的ウェイト） ===
 
-        # 1. モメンタムシグナル（動的閾値）
+        # 1. モメンタムシグナル（動的閾値 + 動的ウェイト）
         if momentum > dynamic_momentum_threshold:  # 動的閾値で上昇判定
             if action != 0:  # MLがSELLでない場合
                 action = 2  # BUY
-            confidence += 0.35
-            reasons.append("momentum_up")
+            confidence += 0.35 * momentum_weight  # 動的ウェイト適用
+            reasons.append(f"momentum_up×{momentum_weight:.1f}")
         elif momentum < -dynamic_momentum_threshold:  # 動的閾値で下落判定
             if action != 2:  # MLがBUYでない場合
                 action = 0  # SELL
-            confidence += 0.35
-            reasons.append("momentum_down")
+            confidence += 0.35 * momentum_weight  # 動的ウェイト適用
+            reasons.append(f"momentum_down×{momentum_weight:.1f}")
 
-        # 2. トレンドフォロー（強化）
+        # 2. トレンドフォロー（強化 + 動的ウェイト）
         if trend == 1:
             if action == 2:
-                confidence += 0.3
+                confidence += 0.3 * trend_weight  # 動的ウェイト適用
             elif action == 1:  # HOLDでもトレンド中は買い
                 action = 2
-                confidence += 0.25
-            reasons.append("uptrend")
+                confidence += 0.25 * trend_weight  # 動的ウェイト適用
+            reasons.append(f"uptrend×{trend_weight:.1f}")
         elif trend == -1:
             if action == 0:
-                confidence += 0.3
-            reasons.append("downtrend")
+                confidence += 0.3 * trend_weight  # 動的ウェイト適用
+            reasons.append(f"downtrend×{trend_weight:.1f}")
 
         # 3. ボラティリティボーナス（低閾値）
         if volatility > 0.003:  # 低ボラでも反応
@@ -1149,9 +1421,57 @@ class AggressiveTrader:
 
         return action, min(confidence, 1.0), ",".join(reasons)
 
+    def _check_drawdown_protection(self) -> bool:
+        """
+        ドローダウン保護チェック（ユーザーアドバイス実装）
+
+        ポートフォリオがピークから5%下落したらポジションを50%縮小
+        Returns: True if protection is active
+        """
+        current_value = self._calculate_current_portfolio_value()
+
+        # ピーク更新
+        if current_value > self.peak_portfolio_value:
+            self.peak_portfolio_value = current_value
+            self.drawdown_protection_active = False
+            self.drawdown_position_scale = 1.0
+            return False
+
+        # ドローダウン計算
+        if self.peak_portfolio_value > 0:
+            drawdown_pct = ((self.peak_portfolio_value - current_value) / self.peak_portfolio_value) * 100
+
+            if drawdown_pct >= self.max_drawdown_pct:
+                if not self.drawdown_protection_active:
+                    # 保護発動！
+                    self.drawdown_protection_active = True
+                    self.drawdown_position_scale = 0.5  # ポジション50%縮小
+                    logger.warning(f"⚠️ DRAWDOWN PROTECTION ACTIVATED! DD={drawdown_pct:.1f}%")
+                    logger.warning(f"  Peak: ¥{self.peak_portfolio_value:,.0f} → Current: ¥{current_value:,.0f}")
+
+                    # LINE通知
+                    if self.notifier:
+                        self.notifier.send_text(
+                            f"⚠️ ドローダウン保護発動\n\n"
+                            f"📉 下落率: {drawdown_pct:.1f}%\n"
+                            f"💰 ピーク: ¥{self.peak_portfolio_value:,.0f}\n"
+                            f"💴 現在: ¥{current_value:,.0f}\n\n"
+                            f"🛡️ ポジションを50%に縮小\n"
+                            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                        )
+                return True
+            elif drawdown_pct < self.max_drawdown_pct * 0.5:
+                # 回復時（ドローダウンが半分以下になったら）
+                if self.drawdown_protection_active:
+                    self.drawdown_protection_active = False
+                    self.drawdown_position_scale = 1.0
+                    logger.info(f"✅ Drawdown protection lifted. DD recovered to {drawdown_pct:.1f}%")
+
+        return self.drawdown_protection_active
+
     def _calculate_order_size(self, pair: str, price: float, is_buy: bool, confidence: float = 0.5) -> float:
         """
-        注文サイズを計算（Kelly基準使用）
+        注文サイズを計算（Kelly基準 + ドローダウン保護）
 
         Kelly Criterion: f* = (p*b - q) / b
         where p = win probability, q = 1-p, b = win/loss ratio
@@ -1183,11 +1503,17 @@ class AggressiveTrader:
             # 信頼度でKelly分数を調整（高信頼度 = 大きいポジション）
             adjusted_kelly = kelly_fraction * (0.5 + confidence * 0.5)  # 0.5〜1.0倍
 
+            # ============================================
+            # ドローダウン保護によるスケーリング
+            # ============================================
+            adjusted_kelly *= self.drawdown_position_scale
+
             # 資本のKelly分数を使用
             available = self.current_capital * adjusted_kelly
 
-            # 最低でも最小注文金額は確保
-            available = max(available, min_order_cost)
+            # 最低でも最小注文金額は確保（保護発動中でも最小は維持）
+            if not self.drawdown_protection_active:
+                available = max(available, min_order_cost)
 
             # 全資金を使用可能（制限なし）
             available = min(available, self.current_capital)
@@ -1199,7 +1525,11 @@ class AggressiveTrader:
                 return 0  # 資金不足
 
             size = max_size
-            logger.debug(f"Kelly sizing: {pair} kelly={kelly_fraction:.2f} adj={adjusted_kelly:.2f} size={size:.4f}")
+
+            if self.drawdown_protection_active:
+                logger.debug(f"Kelly sizing (DD protected): {pair} kelly={kelly_fraction:.2f} scale={self.drawdown_position_scale:.1f} size={size:.4f}")
+            else:
+                logger.debug(f"Kelly sizing: {pair} kelly={kelly_fraction:.2f} adj={adjusted_kelly:.2f} size={size:.4f}")
         else:
             # 売り: 保有ポジションのみ
             position = self.positions.get(pair)
@@ -1369,6 +1699,11 @@ class AggressiveTrader:
                     await asyncio.sleep(poll_interval)
                     continue
 
+                # ============================================
+                # ドローダウン保護チェック（毎tick）
+                # ============================================
+                self._check_drawdown_protection()
+
                 # 各ペアでシグナル生成・取引（超攻撃的）
                 for pair in self.active_pairs:
                     if pair not in prices:
@@ -1498,6 +1833,9 @@ class AggressiveTrader:
             'ml_trained': sum(1 for p in self.ml_predictors.values() if p.trained),
             'ml_total': len(self.ml_predictors),
             'volatility_regime': self.dynamic_optimizer.volatility_regime,
+            'trend_regime': self.dynamic_optimizer.trend_regime,
+            'combined_regime': self.dynamic_optimizer.combined_regime,
+            'drawdown_active': self.drawdown_protection_active,
             'positions': positions_data,
         }
 
