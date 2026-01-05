@@ -176,6 +176,10 @@ class Trader:
         self._cached_balances: Dict[str, float] = {}
         self._balance_last_update: Optional[datetime] = None
 
+        # 失敗したペアのクールダウン（連続失敗防止）
+        self._failed_pairs: Dict[str, datetime] = {}
+        self._fail_cooldown = 60  # 失敗後60秒は再試行しない
+
         # 統計
         self.trades = 0
         self.wins = 0
@@ -227,11 +231,23 @@ class Trader:
 
     def _can_trade(self, pair: str) -> bool:
         """トレード可能か確認"""
+        # 最近の取引チェック
         last = self.last_trade.get(pair)
         if last:
             elapsed = (datetime.now() - last).total_seconds()
             if elapsed < TRADE_COOLDOWN:
                 return False
+
+        # 失敗ペアのクールダウンチェック
+        failed_time = self._failed_pairs.get(pair)
+        if failed_time:
+            elapsed = (datetime.now() - failed_time).total_seconds()
+            if elapsed < self._fail_cooldown:
+                return False
+            else:
+                # クールダウン終了、リセット
+                del self._failed_pairs[pair]
+
         return True
 
     async def _execute_buy(self, pair: str, size: float, reason: str) -> bool:
@@ -271,11 +287,13 @@ class Trader:
                 logger.info(f"  ✅ BUY成功: {pair} {size} @ ¥{price:,.0f} [{reason}]")
                 return True
             else:
-                logger.warning(f"  ⚠️ BUY {pair}: 注文IDなし")
+                logger.warning(f"  ⚠️ BUY {pair}: 注文IDなし - 60秒クールダウン")
+                self._failed_pairs[pair] = datetime.now()
         except asyncio.TimeoutError:
             logger.warning(f"  ⏳ BUY {pair} タイムアウト")
         except Exception as e:
             logger.error(f"  ❌ BUY {pair} エラー: {e}")
+            self._failed_pairs[pair] = datetime.now()
         return False
 
     async def _execute_sell(self, pair: str, size: float, reason: str) -> bool:
@@ -291,18 +309,18 @@ class Trader:
         currency = pair.replace("_JPY", "")
         actual_holding = balances.get(currency, 0)
 
-        # 実際に保有している量を使用（切り捨てで安全側に）
-        size = min(size, actual_holding)
-        # round()ではなく切り捨て（floor）を使用して残高超過を防止
+        # 安全マージン: 99.9%だけ売却（残高誤差対策）
+        size = min(size, actual_holding) * 0.999
+        # 切り捨てで安全側に
         multiplier = 10 ** cfg.decimals
         size = math.floor(size * multiplier) / multiplier
 
         if size < cfg.min_size:
-            logger.debug(f"  SELL {pair} スキップ: 保有不足 ({actual_holding} < {cfg.min_size})")
+            logger.debug(f"  SELL {pair} スキップ: 保有不足 ({actual_holding:.8f})")
             return False
 
         price = await self._get_price(pair) or 0
-        logger.info(f"  📤 SELL注文: {pair} {size} @ ¥{price:,.0f}")
+        logger.info(f"  📤 SELL注文: {pair} {size} (残高: {actual_holding:.8f}) @ ¥{price:,.0f}")
 
         try:
             order_id = await asyncio.wait_for(
@@ -331,11 +349,13 @@ class Trader:
                 logger.info(f"  {emoji} SELL成功: {pair} {size} @ ¥{price:,.0f} → ¥{net_profit:+,.0f} ({pnl_pct:+.2f}%) [{reason}]")
                 return True
             else:
-                logger.warning(f"  ⚠️ SELL {pair}: 注文IDなし")
+                logger.warning(f"  ⚠️ SELL {pair}: 注文IDなし - 60秒クールダウン")
+                self._failed_pairs[pair] = datetime.now()
         except asyncio.TimeoutError:
             logger.warning(f"  ⏳ SELL {pair} タイムアウト")
         except Exception as e:
             logger.error(f"  ❌ SELL {pair} エラー: {e}")
+            self._failed_pairs[pair] = datetime.now()
         return False
 
     def _get_buy_signal(self, pair: str) -> Tuple[bool, str]:
