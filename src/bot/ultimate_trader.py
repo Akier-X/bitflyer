@@ -174,6 +174,11 @@ class UltimateTrader:
         self.win_streak = 0
         self.loss_streak = 0
 
+        # 動的残高監視
+        self._last_known_balances: Dict[str, float] = {}
+        self._balance_check_interval = 30  # 30秒ごとに残高チェック
+        self._last_balance_check: Optional[datetime] = None
+
     # =========================================================================
     # データ取得
     # =========================================================================
@@ -198,6 +203,176 @@ class UltimateTrader:
         except Exception as e:
             logger.debug(f"残高取得エラー: {e}")
         return self._balances
+
+    async def detect_balance_changes(self) -> Dict[str, Tuple[float, float, str]]:
+        """
+        残高変化を検出（入金・出金・手動売買対応）
+        Returns: {currency: (old, new, change_type)}
+        """
+        changes = {}
+
+        # 強制的に最新残高を取得
+        current = await self.get_balances(force=True)
+
+        for currency, new_amount in current.items():
+            old_amount = self._last_known_balances.get(currency, 0)
+            diff = new_amount - old_amount
+
+            # 0.1%以上の変化を検出（微小な変動は無視）
+            if old_amount > 0:
+                pct_change = abs(diff) / old_amount
+                threshold = 0.001  # 0.1%
+            else:
+                pct_change = 1.0 if diff > 0 else 0
+                threshold = 0
+
+            if pct_change > threshold and abs(diff) > 0.0001:
+                if diff > 0:
+                    change_type = "DEPOSIT" if currency == "JPY" else "RECEIVED"
+                else:
+                    change_type = "WITHDRAW" if currency == "JPY" else "SENT"
+                changes[currency] = (old_amount, new_amount, change_type)
+
+        # 消えた通貨もチェック（全額売却/出金）
+        for currency, old_amount in self._last_known_balances.items():
+            if currency not in current and old_amount > 0:
+                change_type = "WITHDRAW" if currency == "JPY" else "SOLD_ALL"
+                changes[currency] = (old_amount, 0, change_type)
+
+        return changes
+
+    async def handle_balance_changes(self, changes: Dict[str, Tuple[float, float, str]]):
+        """残高変化に応じてポジションを再評価"""
+        if not changes:
+            return
+
+        for currency, (old, new, change_type) in changes.items():
+            diff = new - old
+
+            if currency == "JPY":
+                if change_type == "DEPOSIT":
+                    logger.info(f"")
+                    logger.info(f"  💰 【入金検出】¥{diff:+,.0f}")
+                    logger.info(f"     残高: ¥{old:,.0f} → ¥{new:,.0f}")
+
+                    # LINE通知
+                    await self.notifier.notifier.send_message(
+                        f"💰 入金検出: ¥{diff:+,.0f}\n残高: ¥{new:,.0f}"
+                    )
+                elif change_type == "WITHDRAW":
+                    logger.info(f"")
+                    logger.info(f"  📤 【出金検出】¥{diff:,.0f}")
+                    logger.info(f"     残高: ¥{old:,.0f} → ¥{new:,.0f}")
+            else:
+                pair = f"{currency}_JPY"
+                cfg = PAIRS.get(pair)
+
+                if change_type == "RECEIVED":
+                    logger.info(f"")
+                    logger.info(f"  📥 【受取検出】{currency}: {diff:+.8f}")
+                    logger.info(f"     残高: {old:.8f} → {new:.8f}")
+
+                    # 新しいポジションとして登録可能かチェック
+                    await self._update_position_for_currency(pair, currency, new)
+
+                elif change_type == "SENT" or change_type == "SOLD_ALL":
+                    logger.info(f"")
+                    logger.info(f"  📤 【送出検出】{currency}: {diff:.8f}")
+
+                    # ポジションから削除
+                    if pair in self.positions:
+                        del self.positions[pair]
+                        logger.info(f"     ポジション削除: {pair}")
+
+        # 残高を更新
+        self._last_known_balances = await self.get_balances(force=True)
+
+    async def _update_position_for_currency(self, pair: str, currency: str, amount: float):
+        """通貨のポジションを更新/作成"""
+        cfg = PAIRS.get(pair)
+        if not cfg or pair not in self.clients:
+            return
+
+        price = await self.get_price(pair)
+        if not price:
+            return
+
+        # 売却可能量計算
+        multiplier = 10 ** cfg.decimals
+        sellable = math.floor(amount * multiplier) / multiplier
+        min_required = cfg.min_size * 1.005
+
+        if amount >= min_required and sellable >= cfg.min_size:
+            # 新しいポジションとして登録
+            if pair not in self.positions:
+                self.positions[pair] = Position(
+                    pair=pair, size=sellable, entry_price=price,
+                    entry_time=datetime.now(), highest=price, lowest=price
+                )
+                value = amount * price
+                logger.info(f"  ✅ 新規ポジション登録: {currency} {amount:.8f} (¥{value:,.0f})")
+            else:
+                # 既存ポジションのサイズ更新
+                self.positions[pair].size = sellable
+                logger.info(f"  🔄 ポジション更新: {currency} {sellable}")
+        else:
+            logger.info(f"  ⚠️ {currency}: 取引不可（保有={amount:.8f}, 必要={min_required:.8f}）")
+
+    async def refresh_all_positions(self):
+        """全ポジションを再評価（入金後などに使用）"""
+        logger.info("")
+        logger.info("  🔄 【ポジション再評価中】")
+
+        balances = await self.get_balances(force=True)
+        jpy = balances.get("JPY", 0)
+        logger.info(f"  💴 現金: ¥{jpy:,.0f}")
+
+        total = jpy
+        new_positions = {}
+
+        for pair, cfg in PAIRS.items():
+            if pair not in self.clients:
+                continue
+
+            currency = pair.replace("_JPY", "")
+            amount = balances.get(currency, 0)
+
+            price = await self.get_price(pair)
+            if not price:
+                continue
+
+            value = amount * price
+            total += value
+
+            if amount > 0:
+                multiplier = 10 ** cfg.decimals
+                sellable = math.floor(amount * multiplier) / multiplier
+                min_required = cfg.min_size * 1.005
+
+                if amount >= min_required and sellable >= cfg.min_size:
+                    # 既存のエントリー価格を保持
+                    if pair in self.positions:
+                        entry_price = self.positions[pair].entry_price
+                        entry_time = self.positions[pair].entry_time
+                    else:
+                        entry_price = price
+                        entry_time = datetime.now()
+
+                    new_positions[pair] = Position(
+                        pair=pair, size=sellable, entry_price=entry_price,
+                        entry_time=entry_time, highest=price, lowest=price
+                    )
+                    logger.info(f"  💎 {currency}: {amount:.8f} (売却可能: {sellable}, ¥{value:,.0f})")
+                else:
+                    logger.info(f"  📌 {currency}: {amount:.8f} (¥{value:,.0f}) - 売却不可")
+
+        self.positions = new_positions
+        self._last_known_balances = balances.copy()
+
+        logger.info(f"  📊 総資産: ¥{total:,.0f}")
+        logger.info("")
+
+        return total
 
     async def get_price(self, pair: str) -> Optional[float]:
         # WebSocket優先
@@ -675,6 +850,9 @@ class UltimateTrader:
                     logger.info(f"  📌 {currency}: {amount} (¥{value:,.0f}) - 売却不可（余裕不足）")
 
         self.start_value = total
+        self._last_known_balances = balances.copy()
+        self._last_balance_check = datetime.now()
+
         logger.info(f"  📊 総資産: ¥{total:,.0f}")
         logger.info("")
 
@@ -752,6 +930,21 @@ class UltimateTrader:
         while True:
             try:
                 tick += 1
+
+                # === 定期的な残高変化チェック（入金・出金・手動売買検出） ===
+                now = datetime.now()
+                if (self._last_balance_check is None or
+                    (now - self._last_balance_check).seconds >= self._balance_check_interval):
+
+                    changes = await self.detect_balance_changes()
+                    if changes:
+                        await self.handle_balance_changes(changes)
+                        # 大きな変化があれば全ポジション再評価
+                        jpy_change = changes.get("JPY", (0, 0, ""))[1] - changes.get("JPY", (0, 0, ""))[0]
+                        if abs(jpy_change) >= 1000:  # ¥1,000以上の変化
+                            await self.refresh_all_positions()
+
+                    self._last_balance_check = now
 
                 balances = await self.get_balances()
                 jpy = balances.get("JPY", 0)
