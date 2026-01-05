@@ -212,6 +212,50 @@ class LineNotifier:
         ]
         return await self._send("\n".join(lines))
 
+    async def notify_balance_change(self, change_type: str, currency: str,
+                                     old_amount: float, new_amount: float) -> bool:
+        """残高変化通知（入金・出金・手動売買）"""
+        diff = new_amount - old_amount
+
+        if currency == "JPY":
+            if diff > 0:
+                emoji = "💰"
+                title = "入金検出"
+                lines = [
+                    f"{emoji} {title}",
+                    "",
+                    f"金額: ¥{diff:+,.0f}",
+                    f"残高: ¥{old_amount:,.0f} → ¥{new_amount:,.0f}",
+                    f"時刻: {datetime.now().strftime('%H:%M:%S')}"
+                ]
+            else:
+                emoji = "📤"
+                title = "出金検出"
+                lines = [
+                    f"{emoji} {title}",
+                    "",
+                    f"金額: ¥{abs(diff):,.0f}",
+                    f"残高: ¥{old_amount:,.0f} → ¥{new_amount:,.0f}",
+                    f"時刻: {datetime.now().strftime('%H:%M:%S')}"
+                ]
+        else:
+            if diff > 0:
+                emoji = "📥"
+                title = f"{currency} 受取検出"
+            else:
+                emoji = "📤"
+                title = f"{currency} 送出検出"
+
+            lines = [
+                f"{emoji} {title}",
+                "",
+                f"数量: {diff:+.8f}",
+                f"残高: {old_amount:.8f} → {new_amount:.8f}",
+                f"時刻: {datetime.now().strftime('%H:%M:%S')}"
+            ]
+
+        return await self._send("\n".join(lines))
+
 
 class SmartNotifier:
     """スマート通知 (重要度に応じて通知頻度調整)"""
@@ -280,3 +324,8 @@ class SmartNotifier:
     async def alert(self, title: str, message: str) -> bool:
         """アラート"""
         return await self.notifier.notify_alert(title, message)
+
+    async def balance_change(self, change_type: str, currency: str,
+                              old_amount: float, new_amount: float) -> bool:
+        """残高変化通知"""
+        return await self.notifier.notify_balance_change(change_type, currency, old_amount, new_amount)

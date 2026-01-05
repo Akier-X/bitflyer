@@ -256,16 +256,17 @@ class UltimateTrader:
                     logger.info(f"     残高: ¥{old:,.0f} → ¥{new:,.0f}")
 
                     # LINE通知
-                    await self.notifier.notifier.send_message(
-                        f"💰 入金検出: ¥{diff:+,.0f}\n残高: ¥{new:,.0f}"
-                    )
+                    try:
+                        await self.notifier.balance_change(change_type, currency, old, new)
+                    except Exception as e:
+                        logger.debug(f"  LINE通知スキップ: {e}")
+
                 elif change_type == "WITHDRAW":
                     logger.info(f"")
                     logger.info(f"  📤 【出金検出】¥{diff:,.0f}")
                     logger.info(f"     残高: ¥{old:,.0f} → ¥{new:,.0f}")
             else:
                 pair = f"{currency}_JPY"
-                cfg = PAIRS.get(pair)
 
                 if change_type == "RECEIVED":
                     logger.info(f"")
@@ -284,8 +285,12 @@ class UltimateTrader:
                         del self.positions[pair]
                         logger.info(f"     ポジション削除: {pair}")
 
-        # 残高を更新
-        self._last_known_balances = await self.get_balances(force=True)
+            # 各通貨の処理後すぐに更新（繰り返し検出防止）
+            self._last_known_balances[currency] = new
+
+        # 最終的に全残高を同期
+        current = await self.get_balances(force=True)
+        self._last_known_balances = current.copy()
 
     async def _update_position_for_currency(self, pair: str, currency: str, amount: float):
         """通貨のポジションを更新/作成"""
