@@ -722,10 +722,11 @@ class MockBitFlyerClient(BitFlyerClient):
 
     async def get_balance(self) -> List[Dict]:
         """モック残高"""
-        return [
-            {"currency_code": "JPY", **self.mock_balance["JPY"]},
-            {"currency_code": "BTC", **self.mock_balance["BTC"]},
-        ]
+        result = [{"currency_code": "JPY", **self.mock_balance["JPY"]}]
+        for currency, balance in self.mock_balance.items():
+            if currency != "JPY":
+                result.append({"currency_code": currency, **balance})
+        return result
 
     async def send_order(
         self,
@@ -735,33 +736,42 @@ class MockBitFlyerClient(BitFlyerClient):
         price: float = 0,
         **kwargs,
     ) -> Optional[str]:
-        """モック注文"""
+        """モック注文（全ペア対応）"""
         import uuid
 
         order_id = str(uuid.uuid4())[:8]
-        exec_price = self.mock_price
+
+        # 正しい価格を取得
+        exec_price = self.MOCK_BASE_PRICES.get(self.product_code, self.mock_price)
+
+        # 通貨を特定（XRP_JPY → XRP）
+        currency = self.product_code.replace("_JPY", "")
+
+        # 通貨残高を初期化（なければ）
+        if currency not in self.mock_balance:
+            self.mock_balance[currency] = {"amount": 0, "available": 0}
 
         if side == OrderSide.BUY:
             cost = exec_price * size
             if self.mock_balance["JPY"]["available"] >= cost:
                 self.mock_balance["JPY"]["available"] -= cost
                 self.mock_balance["JPY"]["amount"] -= cost
-                self.mock_balance["BTC"]["available"] += size
-                self.mock_balance["BTC"]["amount"] += size
-                logger.info(f"[MOCK] BUY {size} BTC @ {exec_price}")
+                self.mock_balance[currency]["available"] += size
+                self.mock_balance[currency]["amount"] += size
+                logger.info(f"[MOCK] BUY {size:.1f} {currency} @ ¥{exec_price:,.0f} = ¥{cost:,.0f}")
             else:
-                logger.warning("[MOCK] Insufficient balance")
+                logger.warning(f"[MOCK] Insufficient JPY (need ¥{cost:,.0f}, have ¥{self.mock_balance['JPY']['available']:,.0f})")
                 return None
         else:
-            if self.mock_balance["BTC"]["available"] >= size:
-                self.mock_balance["BTC"]["available"] -= size
-                self.mock_balance["BTC"]["amount"] -= size
+            if self.mock_balance[currency]["available"] >= size:
+                self.mock_balance[currency]["available"] -= size
+                self.mock_balance[currency]["amount"] -= size
                 proceeds = exec_price * size
                 self.mock_balance["JPY"]["available"] += proceeds
                 self.mock_balance["JPY"]["amount"] += proceeds
-                logger.info(f"[MOCK] SELL {size} BTC @ {exec_price}")
+                logger.info(f"[MOCK] SELL {size:.1f} {currency} @ ¥{exec_price:,.0f} = ¥{proceeds:,.0f}")
             else:
-                logger.warning("[MOCK] Insufficient BTC")
+                logger.warning(f"[MOCK] Insufficient {currency}")
                 return None
 
         return order_id
