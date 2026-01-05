@@ -485,7 +485,19 @@ class UltimateTrader:
             if pos.size <= 0:
                 return False
 
-            size = pos.size
+            # ペア情報を取得してサイズを正しくフォーマット
+            pair_info = TRADING_PAIRS.get(pair)
+            if not pair_info:
+                return False
+
+            # サイズを正しい小数点桁数に丸める
+            size = round(pos.size, pair_info.size_decimals)
+
+            # 最小取引単位チェック
+            if size < pair_info.min_size:
+                logger.debug(f"{pair}: サイズが小さすぎます ({size} < {pair_info.min_size})")
+                return False
+
             proceeds = size * price
             fee = proceeds * TRADING_FEE_RATE
             net = proceeds - fee
@@ -565,17 +577,15 @@ class UltimateTrader:
         # 残高取得
         jpy, holdings = await self._get_balance()
 
-        if jpy <= 0:
+        if jpy <= 0 and not holdings:
             logger.error("残高を取得できません。API権限を確認してください。")
             return
 
-        self.initial_capital = jpy
         self.current_capital = jpy
-        self.peak_capital = jpy
+        logger.info(f"Cash: ¥{jpy:,.0f}")
 
-        logger.info(f"Balance: ¥{self.initial_capital:,.0f}")
-
-        # 既存ポジション
+        # 既存ポジション読み込み
+        positions_to_sell = []
         for currency, amount in holdings.items():
             pair = f"{currency}_JPY"
             if pair in self.positions:
@@ -583,7 +593,36 @@ class UltimateTrader:
                 price = await self._get_price(pair)
                 if price:
                     self.positions[pair].entry_price = price
-                logger.info(f"Position: {pair} = {amount}")
+                    value = amount * price
+                    pair_info = TRADING_PAIRS.get(pair)
+
+                    # 最小取引単位以上なら売却候補
+                    if pair_info and amount >= pair_info.min_size:
+                        positions_to_sell.append((pair, amount, value))
+                        logger.info(f"Position: {pair} = {amount} (¥{value:,.0f}) [売却可能]")
+                    else:
+                        logger.info(f"Position: {pair} = {amount} (¥{value:,.0f}) [売却不可:最小単位未満]")
+
+        # 初期ポートフォリオ価値を計算
+        self.initial_capital = self._get_portfolio()
+        self.peak_capital = self.initial_capital
+        logger.info(f"Portfolio: ¥{self.initial_capital:,.0f}")
+
+        # 現金が少ない場合、既存ポジションを売却して現金化
+        if self.current_capital < 1000 and positions_to_sell:
+            logger.info("")
+            logger.info("  💰 現金が少ないため、既存ポジションを売却...")
+            for pair, amount, value in positions_to_sell:
+                logger.info(f"  → {pair} (¥{value:,.0f}) を売却中...")
+                success = await self._execute_trade(pair, 0, "LIQUIDATE")
+                if success:
+                    logger.info(f"  ✓ {pair} 売却完了")
+                await asyncio.sleep(1)
+
+            # 残高を再取得
+            jpy, _ = await self._get_balance()
+            self.current_capital = jpy
+            logger.info(f"  💰 新しい残高: ¥{self.current_capital:,.0f}")
 
         logger.info("")
         logger.info("  Trading started! (Press Ctrl+C to stop)")
