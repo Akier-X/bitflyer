@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-    ULTIMATE AI TRADER v4.1 - 本番専用・世界最強
+    ULTIMATE AI TRADER v4.2 - 世界最強・短期高利益システム
 ================================================================================
-    実際の市場で取引する本番専用システム
+    短期間で最大利益を狙う超積極的トレードシステム
 
-    特徴:
-    - 本番API専用 (Mockなし)
-    - リアルタイム市場データ
-    - 自動リトライ機能
-    - 手数料考慮済み
+    設定:
+    - 利確: 1.5% (大きな利益を狙う)
+    - 損切り: 0.8% (損失を限定)
+    - 取引間隔: 2秒 (高頻度)
+    - シグナル閾値: 30% (積極的)
+
+    テクニカル分析 (短期最適化):
+    - RSI(7): 25/75 (極端な水準のみ)
+    - EMA(3/10): 超短期クロス
+    - ボリンジャー(10, 1.5σ): 狭いバンド
 ================================================================================
 """
 
@@ -46,18 +51,18 @@ from src.api.bitflyer_client import BitFlyerClient, OrderSide, OrderType
 # =============================================================================
 
 TRADING_FEE_RATE = 0.0015   # 0.15%
-TAKE_PROFIT_RATE = 0.008    # 0.8%
-STOP_LOSS_RATE = 0.005      # 0.5%
-MIN_TRADE_INTERVAL = 3      # 秒
+TAKE_PROFIT_RATE = 0.015    # 1.5% (より大きな利益を狙う)
+STOP_LOSS_RATE = 0.008      # 0.8% (損失を抑える)
+MIN_TRADE_INTERVAL = 2      # 2秒 (より高速)
 
-# テクニカル指標
-RSI_PERIOD = 14
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
-EMA_SHORT = 5
-EMA_LONG = 20
-BOLLINGER_PERIOD = 20
-BOLLINGER_STD = 2.0
+# テクニカル指標 (短期トレード最適化)
+RSI_PERIOD = 7              # 短期RSI
+RSI_OVERSOLD = 25           # より極端な売られすぎ
+RSI_OVERBOUGHT = 75         # より極端な買われすぎ
+EMA_SHORT = 3               # 超短期EMA
+EMA_LONG = 10               # 短期EMA
+BOLLINGER_PERIOD = 10       # 短期ボリンジャー
+BOLLINGER_STD = 1.5         # 狭いバンド（より多くのシグナル）
 
 # API設定
 API_TIMEOUT = 15.0
@@ -270,10 +275,10 @@ class UltimateTrader:
         self.last_trade_time: Dict[str, datetime] = {}
 
         logger.info("=" * 70)
-        logger.info("    ULTIMATE AI TRADER v4.1 - 本番専用・世界最強")
+        logger.info("    ULTIMATE AI TRADER v4.2 - 世界最強・短期高利益")
         logger.info("=" * 70)
-        logger.info(f"    手数料: {TRADING_FEE_RATE*100:.2f}%")
         logger.info(f"    利確: {TAKE_PROFIT_RATE*100:.1f}% | 損切り: {STOP_LOSS_RATE*100:.1f}%")
+        logger.info(f"    取引間隔: {MIN_TRADE_INTERVAL}秒 | RSI: {RSI_OVERSOLD}/{RSI_OVERBOUGHT}")
         logger.info("=" * 70)
 
     async def _api_call_with_retry(self, coro, retries: int = MAX_RETRIES):
@@ -602,9 +607,10 @@ class UltimateTrader:
                     # シグナル
                     action, conf, reason = self.analyzer.get_signal(pair)
 
-                    if action == 2 and not has_pos and conf >= 0.4:
+                    # より積極的なトレード（信頼度30%以上で実行）
+                    if action == 2 and not has_pos and conf >= 0.3:
                         await self._execute_trade(pair, 2, reason)
-                    elif action == 0 and has_pos and conf >= 0.4:
+                    elif action == 0 and has_pos and conf >= 0.3:
                         await self._execute_trade(pair, 0, reason)
 
                 # ドローダウン
