@@ -367,10 +367,17 @@ class Trader:
         if not cfg or not pos or not client:
             return False
 
-        if pos.size < cfg.min_size:
+        # 実際の残高を取得して確認
+        balances = await self._get_balance()
+        currency = pair.replace("_JPY", "")
+        actual_amount = balances.get(currency, 0)
+
+        if actual_amount < cfg.min_size:
+            logger.debug(f"{pair}: 実際の残高不足 ({actual_amount} < {cfg.min_size})")
+            pos.size = actual_amount  # ローカルを同期
             return False
 
-        size = round(pos.size, cfg.decimals)
+        size = round(actual_amount, cfg.decimals)
         if size < cfg.min_size:
             return False
 
@@ -386,7 +393,7 @@ class Trader:
                 self.last_trade[pair] = datetime.now()
                 self.trades += 1
 
-                profit = proceeds - (pos.size * pos.entry_price)
+                profit = proceeds - (size * pos.entry_price)
                 self.pnl += profit
                 if profit > 0:
                     self.wins += 1
@@ -396,7 +403,7 @@ class Trader:
                 pos.entry_price = 0
 
                 emoji = "💰" if profit >= 0 else "📉"
-                logger.info(f"  {emoji} SELL {pair}: ¥{profit:+,.0f} ({pos.pnl_pct:+.1f}%) [{reason}]")
+                logger.info(f"  {emoji} SELL {pair}: {size} @ ¥{price:,.0f} → ¥{profit:+,.0f} [{reason}]")
                 return True
         except Exception as e:
             logger.error(f"売却エラー: {e}")
