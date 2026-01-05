@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-    📱 LINE通知モジュール
+    📱 LINE通知モジュール (Messaging API版)
 ================================================================================
-    - LINE Notify API
+    - LINE Messaging API (Broadcast)
     - 取引通知
     - 日次レポート
 ================================================================================
@@ -12,13 +12,15 @@
 import os
 import asyncio
 import aiohttp
-from typing import Optional
+import json
+from typing import Optional, List
 from datetime import datetime
 from dataclasses import dataclass
 from loguru import logger
 
 
-LINE_NOTIFY_URL = "https://notify-api.line.me/api/notify"
+# LINE Messaging API エンドポイント
+LINE_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
 
 
 @dataclass
@@ -47,40 +49,51 @@ class DailyReport:
 
 
 class LineNotifier:
-    """LINE通知クラス"""
+    """LINE Messaging API通知クラス"""
 
     def __init__(self, token: Optional[str] = None):
-        self.token = token or os.getenv("LINE_NOTIFY_TOKEN")
+        self.token = token or os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
         self.enabled = bool(self.token)
 
-        if not self.enabled:
-            logger.info("  📱 LINE通知: 無効 (LINE_NOTIFY_TOKEN未設定)")
+        if self.enabled:
+            logger.info("  📱 LINE通知: 有効 (Messaging API)")
+        else:
+            logger.info("  📱 LINE通知: 無効 (LINE_CHANNEL_ACCESS_TOKEN未設定)")
 
     async def _send(self, message: str) -> bool:
-        """メッセージ送信"""
+        """ブロードキャストでメッセージ送信"""
         if not self.enabled:
             return False
 
         headers = {
-            "Authorization": f"Bearer {self.token}"
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
         }
-        data = {
-            "message": message
+
+        # Flex Messageまたはテキストメッセージ
+        payload = {
+            "messages": [
+                {
+                    "type": "text",
+                    "text": message.strip()
+                }
+            ]
         }
 
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    LINE_NOTIFY_URL,
+                    LINE_BROADCAST_URL,
                     headers=headers,
-                    data=data,
+                    json=payload,
                     timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
                     if response.status == 200:
                         logger.debug("  LINE通知送信成功")
                         return True
                     else:
-                        logger.debug(f"  LINE通知エラー: {response.status}")
+                        text = await response.text()
+                        logger.debug(f"  LINE通知エラー: {response.status} - {text}")
                         return False
         except Exception as e:
             logger.debug(f"  LINE通知例外: {e}")
@@ -97,112 +110,107 @@ class LineNotifier:
             emoji = "💰"
             action_text = "売却"
 
-        message = f"""
-{emoji} {action_text}完了！
-
-通貨: {currency}
-数量: {trade.size}
-価格: ¥{trade.price:,.0f}"""
+        lines = [
+            f"{emoji} {action_text}完了！",
+            "",
+            f"通貨: {currency}",
+            f"数量: {trade.size}",
+            f"価格: ¥{trade.price:,.0f}"
+        ]
 
         if trade.pnl is not None:
             pnl_emoji = "📈" if trade.pnl >= 0 else "📉"
-            message += f"""
-
-{pnl_emoji} 損益: ¥{trade.pnl:+,.0f} ({trade.pnl_pct:+.2f}%)"""
+            lines.append("")
+            lines.append(f"{pnl_emoji} 損益: ¥{trade.pnl:+,.0f} ({trade.pnl_pct:+.2f}%)")
 
         if trade.reason:
-            message += f"""
-理由: {trade.reason}"""
+            lines.append(f"理由: {trade.reason}")
 
-        message += f"""
-時刻: {datetime.now().strftime('%H:%M:%S')}"""
+        lines.append(f"時刻: {datetime.now().strftime('%H:%M:%S')}")
 
-        return await self._send(message)
+        return await self._send("\n".join(lines))
 
     async def notify_daily_report(self, report: DailyReport) -> bool:
         """日次レポート通知"""
         win_rate = (report.wins / report.total_trades * 100) if report.total_trades > 0 else 0
-
         pnl_emoji = "💰" if report.total_pnl >= 0 else "📉"
 
-        message = f"""
-📊 【日次レポート】
-
-{pnl_emoji} 本日の損益: ¥{report.total_pnl:+,.0f}
-
-📈 取引回数: {report.total_trades}回
-✅ 勝ち: {report.wins}回
-❌ 負け: {report.losses}回
-📊 勝率: {win_rate:.1f}%"""
+        lines = [
+            "📊 【日次レポート】",
+            "",
+            f"{pnl_emoji} 本日の損益: ¥{report.total_pnl:+,.0f}",
+            "",
+            f"📈 取引回数: {report.total_trades}回",
+            f"✅ 勝ち: {report.wins}回",
+            f"❌ 負け: {report.losses}回",
+            f"📊 勝率: {win_rate:.1f}%"
+        ]
 
         if report.best_trade is not None:
-            message += f"""
-
-🏆 最大利益: ¥{report.best_trade:+,.0f}"""
+            lines.append("")
+            lines.append(f"🏆 最大利益: ¥{report.best_trade:+,.0f}")
 
         if report.worst_trade is not None:
-            message += f"""
-💥 最大損失: ¥{report.worst_trade:+,.0f}"""
+            lines.append(f"💥 最大損失: ¥{report.worst_trade:+,.0f}")
 
         if report.end_balance > 0:
             change = report.end_balance - report.start_balance
             change_pct = (change / report.start_balance * 100) if report.start_balance > 0 else 0
-            message += f"""
+            lines.append("")
+            lines.append(f"💴 資産: ¥{report.end_balance:,.0f} ({change_pct:+.2f}%)")
 
-💴 資産: ¥{report.end_balance:,.0f} ({change_pct:+.2f}%)"""
-
-        return await self._send(message)
+        return await self._send("\n".join(lines))
 
     async def notify_alert(self, title: str, message: str) -> bool:
         """アラート通知"""
-        full_message = f"""
-🚨 {title}
-
-{message}
-
-時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-
-        return await self._send(full_message)
+        lines = [
+            f"🚨 {title}",
+            "",
+            message,
+            "",
+            f"時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ]
+        return await self._send("\n".join(lines))
 
     async def notify_start(self, balance: float, pairs: list) -> bool:
         """起動通知"""
         pairs_str = ", ".join([p.replace("_JPY", "") for p in pairs])
 
-        message = f"""
-🚀 AI TRADER 起動！
-
-💴 資産: ¥{balance:,.0f}
-📊 対象: {pairs_str}
-⏰ 開始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-最強AIトレーダーが稼働を開始しました！"""
-
-        return await self._send(message)
+        lines = [
+            "🚀 AI TRADER v10.0 起動！",
+            "",
+            f"💴 資産: ¥{balance:,.0f}",
+            f"📊 対象: {pairs_str}",
+            f"⏰ 開始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            "世界最強AIトレーダーが稼働開始！"
+        ]
+        return await self._send("\n".join(lines))
 
     async def notify_stop(self, total_pnl: float, trades: int) -> bool:
         """停止通知"""
         pnl_emoji = "💰" if total_pnl >= 0 else "📉"
 
-        message = f"""
-🛑 AI TRADER 停止
-
-{pnl_emoji} 総損益: ¥{total_pnl:+,.0f}
-📊 取引回数: {trades}回
-⏰ 停止: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-
-        return await self._send(message)
+        lines = [
+            "🛑 AI TRADER 停止",
+            "",
+            f"{pnl_emoji} 総損益: ¥{total_pnl:+,.0f}",
+            f"📊 取引回数: {trades}回",
+            f"⏰ 停止: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ]
+        return await self._send("\n".join(lines))
 
     async def notify_milestone(self, milestone: str, balance: float, pnl: float) -> bool:
         """マイルストーン通知"""
-        message = f"""
-🎉 マイルストーン達成！
-
-{milestone}
-
-💴 現在資産: ¥{balance:,.0f}
-📈 累計損益: ¥{pnl:+,.0f}"""
-
-        return await self._send(message)
+        lines = [
+            "🎉 マイルストーン達成！",
+            "",
+            milestone,
+            "",
+            f"💴 現在資産: ¥{balance:,.0f}",
+            f"📈 累計損益: ¥{pnl:+,.0f}"
+        ]
+        return await self._send("\n".join(lines))
 
 
 class SmartNotifier:

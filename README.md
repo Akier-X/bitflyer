@@ -131,12 +131,12 @@ TECH_WEIGHT = 0.7              # テクニカル指標の重み
 
 ## 📱 LINE通知
 
-### 設定方法
-1. [LINE Notify](https://notify-bot.line.me/ja/) でトークン取得
-2. `.env` に追加:
+### 設定方法 (Messaging API)
+`.env` に追加:
 ```
-LINE_NOTIFY_TOKEN=your_token_here
+LINE_CHANNEL_ACCESS_TOKEN=your_channel_access_token
 ```
+※ LINE公式アカウントをフォローしているユーザー全員にブロードキャスト送信されます
 
 ### 通知内容
 - 🛒 購入完了通知
@@ -164,7 +164,7 @@ pip install -r requirements.txt
 # .env ファイル作成
 BITFLYER_API_KEY=your_api_key
 BITFLYER_API_SECRET=your_api_secret
-LINE_NOTIFY_TOKEN=your_line_token  # オプション
+LINE_CHANNEL_ACCESS_TOKEN=your_line_token  # オプション
 ```
 
 ### 3. 実行
