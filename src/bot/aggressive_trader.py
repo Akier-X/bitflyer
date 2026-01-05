@@ -1,31 +1,24 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-    ULTIMATE AI TRADER v4.3 - 現在保有最適化版
+    ULTIMATE AI TRADER v5.0 - 完全同期版
 ================================================================================
-    現在の保有コインを活用して利益を最大化
+    完全にAPIと同期した堅牢なトレーディングシステム
 
-    実際の保有状況 (総資産: ¥6,000):
-    - 現金: ¥920
-    - XLM: 84.89個 (¥3,144) → メイン利確対象
-    - XRP: 5.57個 (¥1,888) → 利確対象
-    - ETH: 微量 (売却不可)
-
-    戦略:
-    - XLM/XRPポジションの利確を狙う
-    - DOGE/MONA/FLRで小額トレード
-    - 資金が増えたらETH/BTCへ
+    主な改善点:
+    - 毎回APIから実残高を取得（ローカルキャッシュに依存しない）
+    - 価格履歴に基づく利確/損切り判定
+    - 安全な注文サイズ計算
+    - 完全なエラーハンドリング
 ================================================================================
 """
 
 import asyncio
 import sys
-import os
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+from dataclasses import dataclass, field
 from collections import deque
-import traceback
 
 import numpy as np
 from loguru import logger
@@ -39,7 +32,7 @@ env_path = PROJECT_ROOT / '.env'
 if env_path.exists():
     load_dotenv(env_path)
 
-from config.settings import Config, get_config
+from config.settings import get_config
 from src.api.bitflyer_client import BitFlyerClient, OrderSide, OrderType
 
 
@@ -47,67 +40,102 @@ from src.api.bitflyer_client import BitFlyerClient, OrderSide, OrderType
 # 設定
 # =============================================================================
 
-TRADING_FEE_RATE = 0.0015   # 0.15%
-TAKE_PROFIT_PCT = 1.0       # 1.0%で利確
-STOP_LOSS_PCT = 0.8         # 0.8%で損切り
-MIN_TRADE_INTERVAL = 3      # 3秒
+TRADING_FEE = 0.0015        # 0.15%
+TAKE_PROFIT = 0.012         # 1.2% (手数料考慮後の実質利益)
+STOP_LOSS = 0.008           # 0.8%
+TRADE_COOLDOWN = 5          # 5秒のクールダウン
+POSITION_RATIO = 0.35       # 現金の35%を1取引に使用
+MIN_CASH_RESERVE = 50       # 最低50円は残す
 
-# テクニカル指標
+# テクニカル設定
 RSI_PERIOD = 7
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
-EMA_SHORT = 3
-EMA_LONG = 10
+RSI_BUY = 35                # 買いシグナル閾値
+RSI_SELL = 65               # 売りシグナル閾値
+MOMENTUM_BUY = 0.002        # 0.2%以上の上昇モメンタム
+MOMENTUM_SELL = -0.002      # -0.2%以下の下落モメンタム
 
 
 # =============================================================================
-# ペア設定
+# ペア設定 (Lightning API対応のみ)
 # =============================================================================
 
 @dataclass
 class PairConfig:
     code: str
-    min_size: float
-    decimals: int
-    priority: int
+    min_size: float     # 最小注文サイズ
+    decimals: int       # サイズの小数点桁数
+    price_tick: float   # 価格の最小単位
 
 
-# 保有コイン優先 (Lightning対応ペアのみ)
 PAIRS = {
-    "XLM_JPY": PairConfig("XLM_JPY", 1.0, 6, 1),      # 保有中: 84.89 XLM ¥3,126
-    "XRP_JPY": PairConfig("XRP_JPY", 1.0, 6, 2),      # 保有中: 5.57 XRP ¥1,872
-    "MONA_JPY": PairConfig("MONA_JPY", 1.0, 6, 3),    # ¥14/個 - 低価格
-    "ETH_JPY": PairConfig("ETH_JPY", 0.01, 7, 4),
-    "BTC_JPY": PairConfig("BTC_JPY", 0.001, 8, 5),
+    "XLM_JPY": PairConfig("XLM_JPY", 1.0, 6, 0.001),
+    "XRP_JPY": PairConfig("XRP_JPY", 1.0, 6, 0.001),
+    "MONA_JPY": PairConfig("MONA_JPY", 1.0, 6, 0.001),
+    "ETH_JPY": PairConfig("ETH_JPY", 0.01, 7, 1),
+    "BTC_JPY": PairConfig("BTC_JPY", 0.001, 8, 1),
 }
 
 
 # =============================================================================
-# テクニカル分析
+# 価格トラッカー（エントリー価格を追跡）
 # =============================================================================
 
-class Analyzer:
-    def __init__(self):
-        self.prices: Dict[str, deque] = {}
+@dataclass
+class PriceTracker:
+    """価格履歴とエントリー価格を追跡"""
+    prices: deque = field(default_factory=lambda: deque(maxlen=200))
+    entry_price: float = 0.0
+    entry_time: Optional[datetime] = None
+    highest_since_entry: float = 0.0
+    lowest_since_entry: float = float('inf')
 
-    def add(self, pair: str, price: float):
-        if pair not in self.prices:
-            self.prices[pair] = deque(maxlen=100)
-        self.prices[pair].append(price)
+    def add_price(self, price: float):
+        self.prices.append(price)
+        if self.entry_price > 0:
+            self.highest_since_entry = max(self.highest_since_entry, price)
+            self.lowest_since_entry = min(self.lowest_since_entry, price)
 
-    def get_signal(self, pair: str) -> Tuple[int, float, str]:
-        """0=SELL, 1=HOLD, 2=BUY"""
-        prices = list(self.prices.get(pair, []))
-        if len(prices) < 15:
-            return 1, 0.0, "waiting"
+    def set_entry(self, price: float):
+        self.entry_price = price
+        self.entry_time = datetime.now()
+        self.highest_since_entry = price
+        self.lowest_since_entry = price
 
-        # RSI
-        deltas = np.diff(prices[-RSI_PERIOD-1:])
+    def clear_entry(self):
+        self.entry_price = 0.0
+        self.entry_time = None
+        self.highest_since_entry = 0.0
+        self.lowest_since_entry = float('inf')
+
+    def get_pnl_pct(self, current_price: float) -> float:
+        if self.entry_price > 0:
+            return (current_price - self.entry_price) / self.entry_price
+        return 0.0
+
+    def get_rsi(self) -> Optional[float]:
+        if len(self.prices) < RSI_PERIOD + 1:
+            return None
+        prices = list(self.prices)[-RSI_PERIOD-1:]
+        deltas = np.diff(prices)
         gains = np.mean(np.where(deltas > 0, deltas, 0))
         losses = np.mean(np.where(deltas < 0, -deltas, 0))
-        rsi = 100 - (100 / (1 + gains / max(losses, 0.0001)))
+        if losses < 0.0001:
+            return 100.0
+        rs = gains / losses
+        return 100 - (100 / (1 + rs))
 
-        # EMA
+    def get_momentum(self) -> Optional[float]:
+        if len(self.prices) < 5:
+            return None
+        return (self.prices[-1] - self.prices[-5]) / self.prices[-5]
+
+    def get_ema_signal(self) -> Optional[int]:
+        """EMAクロスオーバーシグナル: 1=買い, -1=売り, 0=中立"""
+        if len(self.prices) < 12:
+            return None
+
+        prices = list(self.prices)
+
         def ema(data, period):
             m = 2 / (period + 1)
             e = data[0]
@@ -115,92 +143,230 @@ class Analyzer:
                 e = p * m + e * (1 - m)
             return e
 
-        ema_s = ema(prices[-EMA_SHORT:], EMA_SHORT)
-        ema_l = ema(prices[-EMA_LONG:], EMA_LONG)
+        ema_short = ema(prices[-5:], 5)
+        ema_long = ema(prices[-12:], 12)
 
-        # モメンタム
-        mom = (prices[-1] - prices[-5]) / prices[-5] if len(prices) >= 5 else 0
+        diff_pct = (ema_short - ema_long) / ema_long
 
-        # シグナル判定
-        signals = []
-        reasons = []
-
-        if rsi < RSI_OVERSOLD:
-            signals.append(2)
-            reasons.append(f"RSI={rsi:.0f}")
-        elif rsi > RSI_OVERBOUGHT:
-            signals.append(0)
-            reasons.append(f"RSI={rsi:.0f}")
-
-        if ema_s > ema_l * 1.002:
-            signals.append(2)
-            reasons.append("EMA↑")
-        elif ema_s < ema_l * 0.998:
-            signals.append(0)
-            reasons.append("EMA↓")
-
-        if mom > 0.003:
-            signals.append(2)
-            reasons.append(f"MOM+{mom*100:.1f}%")
-        elif mom < -0.003:
-            signals.append(0)
-            reasons.append(f"MOM{mom*100:.1f}%")
-
-        if not signals:
-            return 1, 0.0, "neutral"
-
-        buy = signals.count(2)
-        sell = signals.count(0)
-
-        if buy > sell:
-            return 2, buy / len(signals), ",".join(reasons)
-        elif sell > buy:
-            return 0, sell / len(signals), ",".join(reasons)
-        return 1, 0.0, "mixed"
+        if diff_pct > 0.001:  # 0.1%以上で買い
+            return 1
+        elif diff_pct < -0.001:  # -0.1%以下で売り
+            return -1
+        return 0
 
 
 # =============================================================================
-# ポジション
-# =============================================================================
-
-@dataclass
-class Position:
-    pair: str
-    size: float = 0.0
-    entry_price: float = 0.0
-    current_price: float = 0.0
-
-    @property
-    def value(self) -> float:
-        return self.size * self.current_price
-
-    @property
-    def pnl_pct(self) -> float:
-        if self.entry_price > 0:
-            return (self.current_price / self.entry_price - 1) * 100
-        return 0.0
-
-
-# =============================================================================
-# トレーダー
+# メイントレーダー
 # =============================================================================
 
 class Trader:
     def __init__(self):
         self.config = get_config()
-        self.running = False
-        self.start_time = None
-
-        self.cash = 0.0
-        self.initial_value = 0.0
         self.clients: Dict[str, BitFlyerClient] = {}
-        self.positions: Dict[str, Position] = {}
-        self.analyzer = Analyzer()
+        self.trackers: Dict[str, PriceTracker] = {}
+        self.last_trade: Dict[str, datetime] = {}
 
+        # 統計
         self.trades = 0
         self.wins = 0
-        self.pnl = 0.0
-        self.last_trade: Dict[str, datetime] = {}
+        self.total_pnl = 0.0
+        self.initial_value = 0.0
+        self.start_time = None
+
+    async def _get_balances(self) -> Dict[str, float]:
+        """APIから実残高を取得"""
+        result = {}
+        try:
+            client = list(self.clients.values())[0]
+            balances = await asyncio.wait_for(client.get_balance(), timeout=15)
+            if balances:
+                for b in balances:
+                    currency = b.get("currency_code", "")
+                    amount = float(b.get("available", 0))
+                    if amount > 0:
+                        result[currency] = amount
+        except asyncio.TimeoutError:
+            logger.warning("残高取得タイムアウト")
+        except Exception as e:
+            logger.error(f"残高取得エラー: {e}")
+        return result
+
+    async def _get_price(self, pair: str) -> Optional[float]:
+        """現在価格を取得"""
+        client = self.clients.get(pair)
+        if not client:
+            return None
+        try:
+            ticker = await asyncio.wait_for(client.get_ticker(), timeout=10)
+            if ticker and ticker.ltp > 0:
+                return ticker.ltp
+        except:
+            pass
+        return None
+
+    def _can_trade(self, pair: str) -> bool:
+        """トレード可能か確認"""
+        last = self.last_trade.get(pair)
+        if last:
+            elapsed = (datetime.now() - last).total_seconds()
+            if elapsed < TRADE_COOLDOWN:
+                return False
+        return True
+
+    async def _execute_buy(self, pair: str, size: float, reason: str) -> bool:
+        """買い注文を実行"""
+        cfg = PAIRS.get(pair)
+        client = self.clients.get(pair)
+        if not cfg or not client:
+            return False
+
+        # サイズを正確に丸める
+        size = round(size, cfg.decimals)
+        if size < cfg.min_size:
+            return False
+
+        try:
+            order_id = await asyncio.wait_for(
+                client.send_order(side=OrderSide.BUY, size=size, order_type=OrderType.MARKET),
+                timeout=20
+            )
+            if order_id:
+                self.last_trade[pair] = datetime.now()
+                self.trades += 1
+
+                price = await self._get_price(pair) or 0
+                self.trackers[pair].set_entry(price)
+
+                logger.info(f"  ✅ BUY {pair}: {size} @ ¥{price:,.0f} [{reason}]")
+                return True
+        except asyncio.TimeoutError:
+            logger.warning(f"  ⏳ BUY {pair} タイムアウト")
+        except Exception as e:
+            logger.error(f"  ❌ BUY {pair} エラー: {e}")
+        return False
+
+    async def _execute_sell(self, pair: str, size: float, reason: str) -> bool:
+        """売り注文を実行"""
+        cfg = PAIRS.get(pair)
+        client = self.clients.get(pair)
+        tracker = self.trackers.get(pair)
+        if not cfg or not client or not tracker:
+            return False
+
+        # サイズを正確に丸める
+        size = round(size, cfg.decimals)
+        if size < cfg.min_size:
+            return False
+
+        try:
+            # 現在価格を取得
+            price = await self._get_price(pair) or 0
+
+            order_id = await asyncio.wait_for(
+                client.send_order(side=OrderSide.SELL, size=size, order_type=OrderType.MARKET),
+                timeout=20
+            )
+            if order_id:
+                self.last_trade[pair] = datetime.now()
+                self.trades += 1
+
+                # 損益計算
+                entry = tracker.entry_price if tracker.entry_price > 0 else price
+                gross_profit = (price - entry) * size
+                fee = price * size * TRADING_FEE * 2  # 往復手数料
+                net_profit = gross_profit - fee
+
+                self.total_pnl += net_profit
+                if net_profit > 0:
+                    self.wins += 1
+
+                tracker.clear_entry()
+
+                emoji = "💰" if net_profit >= 0 else "📉"
+                pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0
+                logger.info(f"  {emoji} SELL {pair}: {size} @ ¥{price:,.0f} → ¥{net_profit:+,.0f} ({pnl_pct:+.2f}%) [{reason}]")
+                return True
+        except asyncio.TimeoutError:
+            logger.warning(f"  ⏳ SELL {pair} タイムアウト")
+        except Exception as e:
+            logger.error(f"  ❌ SELL {pair} エラー: {e}")
+        return False
+
+    def _get_buy_signal(self, pair: str) -> Tuple[bool, str]:
+        """買いシグナルを判定"""
+        tracker = self.trackers.get(pair)
+        if not tracker:
+            return False, ""
+
+        rsi = tracker.get_rsi()
+        momentum = tracker.get_momentum()
+        ema_signal = tracker.get_ema_signal()
+
+        signals = []
+        reasons = []
+
+        # RSI
+        if rsi is not None and rsi < RSI_BUY:
+            signals.append(True)
+            reasons.append(f"RSI={rsi:.0f}")
+
+        # モメンタム
+        if momentum is not None and momentum > MOMENTUM_BUY:
+            signals.append(True)
+            reasons.append(f"MOM+{momentum*100:.2f}%")
+
+        # EMA
+        if ema_signal == 1:
+            signals.append(True)
+            reasons.append("EMA↑")
+
+        # 2つ以上のシグナルで買い
+        if len(signals) >= 2:
+            return True, ",".join(reasons)
+
+        return False, ""
+
+    def _get_sell_signal(self, pair: str, current_price: float) -> Tuple[bool, str]:
+        """売りシグナルを判定"""
+        tracker = self.trackers.get(pair)
+        if not tracker:
+            return False, ""
+
+        pnl_pct = tracker.get_pnl_pct(current_price)
+
+        # 利確 (1.2%以上)
+        if pnl_pct >= TAKE_PROFIT:
+            return True, f"PROFIT+{pnl_pct*100:.2f}%"
+
+        # 損切り (-0.8%以下)
+        if pnl_pct <= -STOP_LOSS:
+            return True, f"LOSS{pnl_pct*100:.2f}%"
+
+        # テクニカル売りシグナル
+        rsi = tracker.get_rsi()
+        momentum = tracker.get_momentum()
+        ema_signal = tracker.get_ema_signal()
+
+        tech_signals = 0
+        reasons = []
+
+        if rsi is not None and rsi > RSI_SELL:
+            tech_signals += 1
+            reasons.append(f"RSI={rsi:.0f}")
+
+        if momentum is not None and momentum < MOMENTUM_SELL:
+            tech_signals += 1
+            reasons.append(f"MOM{momentum*100:.2f}%")
+
+        if ema_signal == -1:
+            tech_signals += 1
+            reasons.append("EMA↓")
+
+        # 利益が出ていて、2つ以上のテクニカル売りシグナル
+        if pnl_pct > 0.003 and tech_signals >= 2:  # 0.3%以上の利益
+            return True, ",".join(reasons)
+
+        return False, ""
 
     async def init(self) -> bool:
         """初期化"""
@@ -208,13 +374,14 @@ class Trader:
         api_secret = self.config.bitflyer.api_secret
 
         if not api_key or not api_secret:
-            logger.error("APIキーが設定されていません")
+            logger.error("APIキーが設定されていません (.envファイルを確認)")
             return False
 
         logger.info("=" * 60)
-        logger.info("  ULTIMATE AI TRADER v4.3 - 現在保有最適化版")
+        logger.info("  🚀 ULTIMATE AI TRADER v5.0 - 完全同期版")
         logger.info("=" * 60)
-        logger.info(f"  利確: {TAKE_PROFIT_PCT}% | 損切り: {STOP_LOSS_PCT}%")
+        logger.info(f"  📈 利確: {TAKE_PROFIT*100:.1f}% | 損切り: {STOP_LOSS*100:.1f}%")
+        logger.info(f"  💰 取引比率: {POSITION_RATIO*100:.0f}% | 手数料: {TRADING_FEE*100:.2f}%")
         logger.info("=" * 60)
 
         # クライアント初期化
@@ -228,282 +395,167 @@ class Trader:
                 ticker = await asyncio.wait_for(client.get_ticker(), timeout=10)
                 if ticker and ticker.ltp > 0:
                     self.clients[pair] = client
-                    self.positions[pair] = Position(pair=pair, current_price=ticker.ltp)
+                    self.trackers[pair] = PriceTracker()
+                    self.trackers[pair].add_price(ticker.ltp)
                     min_cost = cfg.min_size * ticker.ltp
-                    logger.info(f"  {pair}: ¥{ticker.ltp:,.0f} (最小: ¥{min_cost:,.0f})")
+                    logger.info(f"  ✓ {pair}: ¥{ticker.ltp:,.0f} (最小: ¥{min_cost:,.0f})")
             except Exception as e:
-                logger.warning(f"  {pair}: 接続失敗")
+                logger.warning(f"  ✗ {pair}: 接続失敗 - {e}")
 
         if not self.clients:
             logger.error("接続できるペアがありません")
             return False
 
-        # 残高取得
-        balances = await self._get_balance()
-        self.cash = balances.get("JPY", 0)
-        logger.info(f"  現金: ¥{self.cash:,.0f}")
+        # 初期残高を表示
+        balances = await self._get_balances()
+        jpy = balances.get("JPY", 0)
+        logger.info("-" * 60)
+        logger.info(f"  💴 現金: ¥{jpy:,.0f}")
 
-        # 保有コイン
-        for currency, amount in balances.items():
-            if currency == "JPY":
-                continue
-            pair = f"{currency}_JPY"
-            if pair in self.positions and amount > 0:
-                pos = self.positions[pair]
-                pos.size = amount
-                pos.entry_price = pos.current_price  # 現在価格をエントリー価格とする
+        total_value = jpy
+        for pair in self.clients:
+            currency = pair.replace("_JPY", "")
+            amount = balances.get(currency, 0)
+            if amount > 0:
+                price = await self._get_price(pair) or 0
+                value = amount * price
+                total_value += value
                 cfg = PAIRS.get(pair)
                 can_sell = cfg and amount >= cfg.min_size
-                status = "売却可" if can_sell else "売却不可"
-                logger.info(f"  {pair}: {amount} (¥{pos.value:,.0f}) [{status}]")
+                status = "✓売却可" if can_sell else "✗少額"
 
-        # 初期ポートフォリオ
-        self.initial_value = self._portfolio()
-        logger.info(f"  総資産: ¥{self.initial_value:,.0f}")
+                # エントリー価格を現在価格に設定（既存ポジション）
+                if can_sell:
+                    self.trackers[pair].set_entry(price)
+
+                logger.info(f"  💎 {currency}: {amount:.6f} (¥{value:,.0f}) [{status}]")
+
+        self.initial_value = total_value
+        logger.info("-" * 60)
+        logger.info(f"  📊 総資産: ¥{total_value:,.0f}")
+        logger.info("=" * 60)
 
         return True
-
-    async def _get_balance(self) -> Dict[str, float]:
-        """残高取得"""
-        result = {}
-        try:
-            client = list(self.clients.values())[0]
-            balances = await asyncio.wait_for(client.get_balance(), timeout=10)
-            if balances:
-                for b in balances:
-                    currency = b.get("currency_code", "")
-                    amount = float(b.get("available", 0))
-                    if amount > 0:
-                        result[currency] = amount
-        except Exception as e:
-            logger.error(f"残高取得エラー: {e}")
-        return result
-
-    async def _get_price(self, pair: str) -> Optional[float]:
-        """価格取得"""
-        client = self.clients.get(pair)
-        if not client:
-            return None
-        try:
-            ticker = await asyncio.wait_for(client.get_ticker(), timeout=10)
-            if ticker and ticker.ltp > 0:
-                self.analyzer.add(pair, ticker.ltp)
-                self.positions[pair].current_price = ticker.ltp
-                return ticker.ltp
-        except:
-            pass
-        return None
-
-    def _portfolio(self) -> float:
-        """ポートフォリオ価値"""
-        total = self.cash
-        for pos in self.positions.values():
-            total += pos.value
-        return total
-
-    def _can_trade(self, pair: str) -> bool:
-        """取引可能か"""
-        last = self.last_trade.get(pair)
-        if last and (datetime.now() - last).seconds < MIN_TRADE_INTERVAL:
-            return False
-        return True
-
-    async def _buy(self, pair: str, reason: str) -> bool:
-        """購入"""
-        if not self._can_trade(pair):
-            return False
-
-        cfg = PAIRS.get(pair)
-        pos = self.positions.get(pair)
-        client = self.clients.get(pair)
-        if not cfg or not pos or not client:
-            return False
-
-        price = pos.current_price
-        min_cost = cfg.min_size * price
-
-        # 資金チェック
-        if self.cash < min_cost * 1.01:  # 手数料込み
-            return False
-
-        # サイズ計算 (資金の40%)
-        budget = min(self.cash * 0.4, self.cash - 100)  # 100円は残す
-        if budget < min_cost:
-            budget = min_cost
-
-        size = budget / price
-        size = max(cfg.min_size, size)
-        size = round(size, cfg.decimals)
-
-        cost = size * price
-        if cost > self.cash:
-            return False
-
-        try:
-            order_id = await asyncio.wait_for(
-                client.send_order(side=OrderSide.BUY, size=size, order_type=OrderType.MARKET),
-                timeout=15
-            )
-            if order_id:
-                self.last_trade[pair] = datetime.now()
-                self.trades += 1
-                self.cash -= cost * (1 + TRADING_FEE_RATE)
-                pos.size += size
-                pos.entry_price = price
-                logger.info(f"  ✓ BUY {pair}: {size} @ ¥{price:,.0f} [{reason}]")
-                return True
-        except Exception as e:
-            logger.error(f"購入エラー: {e}")
-        return False
-
-    async def _sell(self, pair: str, reason: str) -> bool:
-        """売却"""
-        if not self._can_trade(pair):
-            return False
-
-        cfg = PAIRS.get(pair)
-        pos = self.positions.get(pair)
-        client = self.clients.get(pair)
-        if not cfg or not pos or not client:
-            return False
-
-        # 実際の残高を取得して確認
-        balances = await self._get_balance()
-        currency = pair.replace("_JPY", "")
-        actual_amount = balances.get(currency, 0)
-
-        if actual_amount < cfg.min_size:
-            logger.debug(f"{pair}: 実際の残高不足 ({actual_amount} < {cfg.min_size})")
-            pos.size = actual_amount  # ローカルを同期
-            return False
-
-        size = round(actual_amount, cfg.decimals)
-        if size < cfg.min_size:
-            return False
-
-        price = pos.current_price
-        proceeds = size * price * (1 - TRADING_FEE_RATE)
-
-        try:
-            order_id = await asyncio.wait_for(
-                client.send_order(side=OrderSide.SELL, size=size, order_type=OrderType.MARKET),
-                timeout=15
-            )
-            if order_id:
-                self.last_trade[pair] = datetime.now()
-                self.trades += 1
-
-                profit = proceeds - (size * pos.entry_price)
-                self.pnl += profit
-                if profit > 0:
-                    self.wins += 1
-
-                self.cash += proceeds
-                pos.size = 0
-                pos.entry_price = 0
-
-                emoji = "💰" if profit >= 0 else "📉"
-                logger.info(f"  {emoji} SELL {pair}: {size} @ ¥{price:,.0f} → ¥{profit:+,.0f} [{reason}]")
-                return True
-        except Exception as e:
-            logger.error(f"売却エラー: {e}")
-        return False
 
     def _log_status(self):
-        """ステータス表示"""
-        portfolio = self._portfolio()
-        roi = (portfolio / self.initial_value - 1) * 100 if self.initial_value > 0 else 0
+        """現在のステータスを表示"""
+        elapsed = datetime.now() - self.start_time if self.start_time else timedelta(0)
+        hours = elapsed.total_seconds() / 3600
+
         win_rate = (self.wins / self.trades * 100) if self.trades > 0 else 0
 
         logger.info("")
         logger.info("=" * 50)
-        logger.info(f"  💼 Portfolio: ¥{portfolio:,.0f} ({roi:+.2f}%)")
-        logger.info(f"  💴 Cash: ¥{self.cash:,.0f}")
-        logger.info(f"  📊 Trades: {self.trades} | Win: {win_rate:.0f}%")
-        logger.info("-" * 50)
-        for pair, pos in self.positions.items():
-            if pos.size > 0:
-                logger.info(f"  {pair}: {pos.size:.4f} @ ¥{pos.current_price:,.0f} ({pos.pnl_pct:+.2f}%)")
+        logger.info(f"  ⏱️  経過: {elapsed.seconds // 3600}h {(elapsed.seconds % 3600) // 60}m")
+        logger.info(f"  📊 取引: {self.trades}回 | 勝率: {win_rate:.0f}%")
+        logger.info(f"  💰 累計損益: ¥{self.total_pnl:+,.0f}")
         logger.info("=" * 50)
 
     async def run(self):
         """メインループ"""
-        self.running = True
-        self.start_time = datetime.now()
-
         if not await self.init():
             return
 
+        self.start_time = datetime.now()
         logger.info("")
-        logger.info("  🚀 Trading started!")
+        logger.info("  🎯 トレード開始!")
+        logger.info("  Ctrl+C で停止")
         logger.info("")
 
         tick = 0
-        while self.running:
-            try:
+        status_interval = 120  # 2分ごとにステータス表示
+
+        try:
+            while True:
                 tick += 1
 
-                # 価格更新
-                for pair in self.clients:
-                    await self._get_price(pair)
-                    await asyncio.sleep(0.3)
+                # === 1. 残高とポジションを取得 ===
+                balances = await self._get_balances()
+                jpy_balance = balances.get("JPY", 0)
 
-                # 各ペアの取引判断
-                for pair in self.clients:
-                    pos = self.positions.get(pair)
-                    cfg = PAIRS.get(pair)
-                    if not pos or not cfg:
+                # === 2. 各ペアの処理 ===
+                for pair, cfg in PAIRS.items():
+                    if pair not in self.clients:
                         continue
 
-                    has_position = pos.size >= cfg.min_size
+                    tracker = self.trackers[pair]
+                    currency = pair.replace("_JPY", "")
+                    holding = balances.get(currency, 0)
 
-                    # === 保有中の場合 ===
+                    # 価格を取得して記録
+                    price = await self._get_price(pair)
+                    if not price:
+                        continue
+                    tracker.add_price(price)
+
+                    has_position = holding >= cfg.min_size
+
+                    # === 保有中の場合: 売りを検討 ===
                     if has_position:
-                        # 利確
-                        if pos.pnl_pct >= TAKE_PROFIT_PCT:
-                            logger.info(f"  📈 利確シグナル: {pair} ({pos.pnl_pct:+.2f}%)")
-                            await self._sell(pair, "TAKE_PROFIT")
+                        if not self._can_trade(pair):
                             continue
 
-                        # 損切り
-                        if pos.pnl_pct <= -STOP_LOSS_PCT:
-                            logger.info(f"  📉 損切りシグナル: {pair} ({pos.pnl_pct:+.2f}%)")
-                            await self._sell(pair, "STOP_LOSS")
-                            continue
+                        should_sell, reason = self._get_sell_signal(pair, price)
+                        if should_sell:
+                            await self._execute_sell(pair, holding, reason)
 
-                        # テクニカル売りシグナル
-                        action, conf, reason = self.analyzer.get_signal(pair)
-                        if action == 0 and conf >= 0.5:
-                            await self._sell(pair, reason)
-
-                    # === 保有なしの場合 ===
+                    # === 保有なしの場合: 買いを検討 ===
                     else:
-                        min_cost = cfg.min_size * pos.current_price
-                        if self.cash < min_cost * 1.01:
-                            continue  # 資金不足
+                        # エントリー価格をクリア（ポジションがないので）
+                        if tracker.entry_price > 0:
+                            tracker.clear_entry()
 
-                        action, conf, reason = self.analyzer.get_signal(pair)
-                        if action == 2 and conf >= 0.5:
-                            await self._buy(pair, reason)
+                        # 資金チェック
+                        min_cost = cfg.min_size * price * (1 + TRADING_FEE)
+                        available = jpy_balance - MIN_CASH_RESERVE
 
-                # ステータス表示 (60秒ごと)
-                if tick % 60 == 0:
+                        if available < min_cost:
+                            continue
+
+                        if not self._can_trade(pair):
+                            continue
+
+                        should_buy, reason = self._get_buy_signal(pair)
+                        if should_buy:
+                            # 購入サイズを計算
+                            budget = min(available * POSITION_RATIO, available - MIN_CASH_RESERVE)
+                            if budget < min_cost:
+                                budget = min_cost
+
+                            size = budget / price
+                            size = max(cfg.min_size, size)
+
+                            # 実際のコストを再計算
+                            actual_cost = size * price * (1 + TRADING_FEE)
+                            if actual_cost > available:
+                                size = (available / (1 + TRADING_FEE)) / price
+
+                            if size >= cfg.min_size:
+                                await self._execute_buy(pair, size, reason)
+
+                    # 少し待機（API制限対策）
+                    await asyncio.sleep(0.2)
+
+                # === 3. ステータス表示 ===
+                if tick % status_interval == 0:
                     self._log_status()
 
+                # メインループ待機
                 await asyncio.sleep(1)
 
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                logger.error(f"エラー: {e}")
-                await asyncio.sleep(5)
-
-        logger.info("")
-        logger.info("  🛑 Stopped")
-        self._log_status()
+        except KeyboardInterrupt:
+            logger.info("")
+            logger.info("  🛑 停止しました")
+        except Exception as e:
+            logger.error(f"予期しないエラー: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self._log_status()
 
 
 async def main():
+    # ロガー設定
     logger.remove()
     logger.add(
         sys.stderr,
@@ -512,11 +564,11 @@ async def main():
     )
 
     trader = Trader()
-    try:
-        await trader.run()
-    except KeyboardInterrupt:
-        pass
+    await trader.run()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
