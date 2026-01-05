@@ -621,24 +621,35 @@ class UltimateTrader:
         jpy = balances.get("JPY", 0)
         logger.info(f"  💴 現金: ¥{jpy:,.0f}")
 
+        # デバッグ: 全残高表示
+        logger.debug(f"  残高一覧: {balances}")
+
         total = jpy
         for pair in self.clients:
             currency = pair.replace("_JPY", "")
             amount = balances.get(currency, 0)
+
+            price = await self.get_price(pair) or 0
+            if price <= 0:
+                continue
+
+            value = amount * price
+            total += value
+
             if amount > 0:
-                price = await self.get_price(pair) or 0
-                value = amount * price
-                total += value
                 cfg = PAIRS.get(pair)
                 multiplier = 10 ** cfg.decimals
                 sellable = math.floor(amount * 0.95 * multiplier) / multiplier
 
+                # 最小取引量以上なら保有ポジションとして登録
                 if sellable >= cfg.min_size:
                     self.positions[pair] = Position(
                         pair=pair, size=sellable, entry_price=price,
                         entry_time=datetime.now(), highest=price, lowest=price
                     )
-                    logger.info(f"  💎 {currency}: {sellable} (¥{value:,.0f})")
+                    logger.info(f"  💎 {currency}: {amount:.4f} (売却可能: {sellable}, ¥{value:,.0f})")
+                else:
+                    logger.info(f"  📌 {currency}: {amount:.4f} (¥{value:,.0f}) - 最小未満")
 
         self.start_value = total
         logger.info(f"  📊 総資産: ¥{total:,.0f}")
