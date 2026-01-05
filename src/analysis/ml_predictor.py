@@ -171,7 +171,7 @@ class MLPredictor:
         self.hidden_size = hidden_size
 
         self.prices: deque = deque(maxlen=500)
-        self.rnn = SimpleRNN(lookback, hidden_size, 3)  # 3出力: 上昇/下落/横ばい確率
+        self.rnn = SimpleRNN(1, hidden_size, 3)  # 入力サイズ1 (時系列で1つずつ入力)
         self.pattern_recognizer = PatternRecognizer()
 
         self.training_data: List[Tuple[np.ndarray, int]] = []
