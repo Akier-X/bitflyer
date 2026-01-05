@@ -179,6 +179,7 @@ class UltimateTrader:
     # =========================================================================
 
     async def get_balances(self, force: bool = False) -> Dict[str, float]:
+        """APIから残高を取得"""
         if not force and self._balance_time:
             if (datetime.now() - self._balance_time).seconds < 20:
                 return self._balances
@@ -186,13 +187,16 @@ class UltimateTrader:
             client = next(iter(self.clients.values()))
             data = await asyncio.wait_for(client.get_balance(), timeout=15)
             if data:
-                self._balances = {
-                    b["currency_code"]: float(b.get("available", 0))
-                    for b in data if float(b.get("available", 0)) > 0
-                }
+                # 全ての残高を取得（0より大きいもの）
+                self._balances = {}
+                for b in data:
+                    code = b.get("currency_code", "")
+                    available = float(b.get("available", 0))
+                    if available > 0:
+                        self._balances[code] = available
                 self._balance_time = datetime.now()
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"残高取得エラー: {e}")
         return self._balances
 
     async def get_price(self, pair: str) -> Optional[float]:
@@ -615,31 +619,38 @@ class UltimateTrader:
                 pass
         await asyncio.sleep(0.5)
 
-        # 残高確認
+        # 残高確認（APIから正確な情報を取得）
         logger.info("")
         balances = await self.get_balances(force=True)
         jpy = balances.get("JPY", 0)
         logger.info(f"  💴 現金: ¥{jpy:,.0f}")
 
-        # デバッグ: 全残高表示
-        logger.debug(f"  残高一覧: {balances}")
+        # 全残高を表示（API取得値）
+        logger.info(f"  📋 API残高: {balances}")
 
         total = jpy
+
+        # 各ペアの保有量をチェック
         for pair in self.clients:
             currency = pair.replace("_JPY", "")
             amount = balances.get(currency, 0)
+            cfg = PAIRS.get(pair)
 
-            price = await self.get_price(pair) or 0
-            if price <= 0:
+            # APIから現在価格を取得
+            price = await self.get_price(pair)
+            if not price or price <= 0:
+                logger.debug(f"  {currency}: 価格取得失敗")
                 continue
 
             value = amount * price
             total += value
 
             if amount > 0:
-                cfg = PAIRS.get(pair)
+                # APIからの正確な値で計算
                 multiplier = 10 ** cfg.decimals
                 sellable = math.floor(amount * 0.95 * multiplier) / multiplier
+
+                logger.info(f"  📊 {currency}: 保有={amount}, 売却可能={sellable}, 最小={cfg.min_size}")
 
                 # 最小取引量以上なら保有ポジションとして登録
                 if sellable >= cfg.min_size:
@@ -647,9 +658,9 @@ class UltimateTrader:
                         pair=pair, size=sellable, entry_price=price,
                         entry_time=datetime.now(), highest=price, lowest=price
                     )
-                    logger.info(f"  💎 {currency}: {amount:.4f} (売却可能: {sellable}, ¥{value:,.0f})")
+                    logger.info(f"  💎 {currency}: {amount} (売却可能: {sellable}, ¥{value:,.0f})")
                 else:
-                    logger.info(f"  📌 {currency}: {amount:.4f} (¥{value:,.0f}) - 最小未満")
+                    logger.info(f"  📌 {currency}: {amount} (¥{value:,.0f}) - 売却不可（最小{cfg.min_size}未満）")
 
         self.start_value = total
         logger.info(f"  📊 総資産: ¥{total:,.0f}")
