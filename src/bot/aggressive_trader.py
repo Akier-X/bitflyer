@@ -26,7 +26,10 @@ import traceback
 import numpy as np
 from loguru import logger
 
-sys.path.insert(0, '/home/user/bitflyer')
+# プロジェクトルートをパスに追加（Windows/Linux両対応）
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import Config, get_config
 from src.api.bitflyer_client import BitFlyerClient, MockBitFlyerClient, OrderSide, OrderType
