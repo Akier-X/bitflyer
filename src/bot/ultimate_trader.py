@@ -457,12 +457,16 @@ class UltimateTrader:
         currency = pair.replace("_JPY", "")
         holding = balances.get(currency, 0)
 
-        # 安全な売却サイズ
-        size = holding * 0.95
+        # 安全な売却サイズ（99%で計算）
         multiplier = 10 ** cfg.decimals
-        size = math.floor(size * multiplier) / multiplier
+        size = math.floor(holding * 0.99 * multiplier) / multiplier
+
+        # 最小取引量以上保有していて、計算結果が最小未満なら最小で売却
+        if size < cfg.min_size and holding >= cfg.min_size:
+            size = cfg.min_size
 
         if size < cfg.min_size:
+            logger.debug(f"  {currency}: 売却不可（保有={holding}, 最小={cfg.min_size}）")
             return False
 
         price = await self.get_price(pair)
@@ -648,7 +652,14 @@ class UltimateTrader:
             if amount > 0:
                 # APIからの正確な値で計算
                 multiplier = 10 ** cfg.decimals
-                sellable = math.floor(amount * 0.95 * multiplier) / multiplier
+
+                # 売却可能量を計算（99%で計算、ただし最小取引量は確保）
+                sellable_raw = amount * 0.99
+                sellable = math.floor(sellable_raw * multiplier) / multiplier
+
+                # 最小取引量以上保有していて、計算結果が最小未満なら最小で売却
+                if sellable < cfg.min_size and amount >= cfg.min_size:
+                    sellable = cfg.min_size
 
                 logger.info(f"  📊 {currency}: 保有={amount}, 売却可能={sellable}, 最小={cfg.min_size}")
 
