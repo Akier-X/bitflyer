@@ -304,6 +304,15 @@ class Trader:
         if not cfg or not client or not tracker:
             return False
 
+        # 未決済注文をキャンセル（残高ロック解除）
+        try:
+            await client.cancel_all_orders(pair)
+        except Exception as e:
+            logger.debug(f"  注文キャンセル失敗: {e}")
+
+        # 少し待機（キャンセル反映待ち）
+        await asyncio.sleep(0.5)
+
         # 最終確認: 実際の保有量をチェック
         balances = await self._get_balances(force=True)
         currency = pair.replace("_JPY", "")
@@ -472,8 +481,19 @@ class Trader:
             logger.error("接続できるペアがありません")
             return False
 
+        # 全ペアの未決済注文をキャンセル
+        logger.info("-" * 60)
+        logger.info("  🔄 未決済注文をキャンセル中...")
+        for pair, client in self.clients.items():
+            try:
+                await client.cancel_all_orders(pair)
+                logger.info(f"  ✓ {pair}: キャンセル完了")
+            except Exception as e:
+                logger.debug(f"  {pair}: キャンセル不要またはエラー")
+        await asyncio.sleep(1)  # キャンセル反映待ち
+
         # 初期残高を表示
-        balances = await self._get_balances()
+        balances = await self._get_balances(force=True)
         jpy = balances.get("JPY", 0)
         logger.info("-" * 60)
         logger.info(f"  💴 現金: ¥{jpy:,.0f}")
