@@ -83,11 +83,12 @@ class TradingPair:
     current_price: float = 0.0
 
 
+# 残高¥920で取引可能なペアを優先
 TRADING_PAIRS = {
-    "ETH_JPY": TradingPair("ETH_JPY", 0.01, 2, 1),
-    "XRP_JPY": TradingPair("XRP_JPY", 1.0, 0, 2),
-    "MONA_JPY": TradingPair("MONA_JPY", 1.0, 1, 3),
-    "BTC_JPY": TradingPair("BTC_JPY", 0.001, 4, 4),
+    "XRP_JPY": TradingPair("XRP_JPY", 1.0, 6, 1),      # ¥337 × 1 = ¥337 ✓
+    "MONA_JPY": TradingPair("MONA_JPY", 1.0, 6, 2),    # ¥14 × 1 = ¥14 ✓
+    "ETH_JPY": TradingPair("ETH_JPY", 0.01, 7, 3),     # ¥500,890 × 0.01 = ¥5,008 ✗
+    "BTC_JPY": TradingPair("BTC_JPY", 0.001, 8, 4),    # ¥14,561,322 × 0.001 = ¥14,561 ✗
 }
 
 
@@ -399,15 +400,27 @@ class UltimateTrader:
         if not pair_info:
             return 0.0
 
-        available = self.current_capital * 0.30
+        # 最小取引金額チェック
         min_cost = pair_info.min_size * price
+        if self.current_capital < min_cost:
+            logger.debug(f"{pair}: 資金不足 (必要: ¥{min_cost:,.0f}, 残高: ¥{self.current_capital:,.0f})")
+            return 0.0
+
+        # 資金の50%を使用（より積極的）
+        available = self.current_capital * 0.50
 
         if available < min_cost:
-            return 0.0
+            available = min_cost  # 最小取引額を使用
 
         size = available / price
         size = max(pair_info.min_size, size)
+
+        # 正しい小数点桁数に丸める
         size = round(size, pair_info.size_decimals)
+
+        # 最終確認
+        if size < pair_info.min_size:
+            return 0.0
 
         return size
 
