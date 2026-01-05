@@ -1,5 +1,5 @@
-# Ultimate AI Trader v4.0 - Dependencies
-# =====================================
+# Ultimate AI Trader v10.0 - Dependencies
+# ========================================
 
 # Core
 numpy>=1.21.0
@@ -7,6 +7,9 @@ loguru>=0.6.0
 
 # Async HTTP
 aiohttp>=3.8.0
+
+# WebSocket
+websockets>=11.0
 
 # Environment
 python-dotenv>=1.0.0
