@@ -457,16 +457,19 @@ class UltimateTrader:
         currency = pair.replace("_JPY", "")
         holding = balances.get(currency, 0)
 
-        # 手数料を考慮した安全な売却サイズ計算
-        # bitFlyer手数料は別途JPYから引かれるため、保有量ギリギリでも売却可能
+        # 売却サイズ計算
         multiplier = 10 ** cfg.decimals
-
-        # 小数点以下を切り捨てた売却サイズ
         size = math.floor(holding * multiplier) / multiplier
 
-        # 最小取引量チェック
-        if size < cfg.min_size:
-            logger.debug(f"  {currency}: 売却不可（保有={holding:.8f}, 最小={cfg.min_size}）")
+        # 最小取引量+0.5%の余裕が必要（API制限対策）
+        min_required = cfg.min_size * 1.005
+
+        # 保有量に十分な余裕がない場合は売却スキップ
+        if holding < min_required or size < cfg.min_size:
+            logger.info(f"  ⚠️ {currency}: 売却スキップ（保有={holding:.8f}, 必要={min_required:.8f}）")
+            # ポジションから削除
+            if pair in self.positions:
+                del self.positions[pair]
             return False
 
         logger.info(f"  📊 売却計算: 保有={holding:.8f}, 売却サイズ={size}")
@@ -652,23 +655,24 @@ class UltimateTrader:
             total += value
 
             if amount > 0:
-                # 売却可能量計算（手数料はJPYから引かれるため、保有量をそのまま使用）
+                # 売却可能量計算
                 multiplier = 10 ** cfg.decimals
-
-                # 小数点以下を切り捨て
                 sellable = math.floor(amount * multiplier) / multiplier
 
-                logger.info(f"  📊 {currency}: 保有={amount:.8f}, 売却可能={sellable}, 最小={cfg.min_size}")
+                # 最小取引量+0.5%の余裕が必要（API制限対策）
+                min_required = cfg.min_size * 1.005
 
-                # 最小取引量以上なら保有ポジションとして登録
-                if sellable >= cfg.min_size:
+                logger.info(f"  📊 {currency}: 保有={amount:.8f}, 売却可能={sellable}, 最小={cfg.min_size}, 必要={min_required:.8f}")
+
+                # 十分な余裕がある場合のみポジションとして登録
+                if amount >= min_required and sellable >= cfg.min_size:
                     self.positions[pair] = Position(
                         pair=pair, size=sellable, entry_price=price,
                         entry_time=datetime.now(), highest=price, lowest=price
                     )
                     logger.info(f"  💎 {currency}: {amount} (売却可能: {sellable}, ¥{value:,.0f})")
                 else:
-                    logger.info(f"  📌 {currency}: {amount} (¥{value:,.0f}) - 売却不可（最小{cfg.min_size}未満）")
+                    logger.info(f"  📌 {currency}: {amount} (¥{value:,.0f}) - 売却不可（余裕不足）")
 
         self.start_value = total
         logger.info(f"  📊 総資産: ¥{total:,.0f}")
