@@ -245,6 +245,18 @@ class Trader:
         if size < cfg.min_size:
             return False
 
+        # 最終確認: 実際の残高をチェック
+        balances = await self._get_balances(force=True)
+        jpy_available = balances.get("JPY", 0)
+        price = await self._get_price(pair) or 0
+        required = size * price * (1 + TRADING_FEE)
+
+        if jpy_available < required:
+            logger.debug(f"  BUY {pair} スキップ: 残高不足 (¥{jpy_available:,.0f} < ¥{required:,.0f})")
+            return False
+
+        logger.info(f"  📤 BUY注文: {pair} {size} @ ¥{price:,.0f} (必要: ¥{required:,.0f})")
+
         try:
             order_id = await asyncio.wait_for(
                 client.send_order(side=OrderSide.BUY, size=size, order_type=OrderType.MARKET),
@@ -253,12 +265,12 @@ class Trader:
             if order_id:
                 self.last_trade[pair] = datetime.now()
                 self.trades += 1
-
-                price = await self._get_price(pair) or 0
                 self.trackers[pair].set_entry(price)
-
-                logger.info(f"  ✅ BUY {pair}: {size} @ ¥{price:,.0f} [{reason}]")
+                self._cached_balances = {}  # キャッシュクリア
+                logger.info(f"  ✅ BUY成功: {pair} {size} @ ¥{price:,.0f} [{reason}]")
                 return True
+            else:
+                logger.warning(f"  ⚠️ BUY {pair}: 注文IDなし")
         except asyncio.TimeoutError:
             logger.warning(f"  ⏳ BUY {pair} タイムアウト")
         except Exception as e:
@@ -273,15 +285,23 @@ class Trader:
         if not cfg or not client or not tracker:
             return False
 
-        # サイズを正確に丸める
+        # 最終確認: 実際の保有量をチェック
+        balances = await self._get_balances(force=True)
+        currency = pair.replace("_JPY", "")
+        actual_holding = balances.get(currency, 0)
+
+        # 実際に保有している量を使用
+        size = min(size, actual_holding)
         size = round(size, cfg.decimals)
+
         if size < cfg.min_size:
+            logger.debug(f"  SELL {pair} スキップ: 保有不足 ({actual_holding} < {cfg.min_size})")
             return False
 
-        try:
-            # 現在価格を取得
-            price = await self._get_price(pair) or 0
+        price = await self._get_price(pair) or 0
+        logger.info(f"  📤 SELL注文: {pair} {size} @ ¥{price:,.0f}")
 
+        try:
             order_id = await asyncio.wait_for(
                 client.send_order(side=OrderSide.SELL, size=size, order_type=OrderType.MARKET),
                 timeout=20
@@ -301,11 +321,14 @@ class Trader:
                     self.wins += 1
 
                 tracker.clear_entry()
+                self._cached_balances = {}  # キャッシュクリア
 
                 emoji = "💰" if net_profit >= 0 else "📉"
                 pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0
-                logger.info(f"  {emoji} SELL {pair}: {size} @ ¥{price:,.0f} → ¥{net_profit:+,.0f} ({pnl_pct:+.2f}%) [{reason}]")
+                logger.info(f"  {emoji} SELL成功: {pair} {size} @ ¥{price:,.0f} → ¥{net_profit:+,.0f} ({pnl_pct:+.2f}%) [{reason}]")
                 return True
+            else:
+                logger.warning(f"  ⚠️ SELL {pair}: 注文IDなし")
         except asyncio.TimeoutError:
             logger.warning(f"  ⏳ SELL {pair} タイムアウト")
         except Exception as e:
@@ -519,11 +542,8 @@ class Trader:
 
                         should_sell, reason = self._get_sell_signal(pair, price)
                         if should_sell:
-                            # 売却前に最新残高を取得
-                            fresh_balances = await self._get_balances(force=True)
-                            actual_holding = fresh_balances.get(currency, 0)
-                            if actual_holding >= cfg.min_size:
-                                await self._execute_sell(pair, actual_holding, reason)
+                            # _execute_sell内で残高チェックを行う
+                            await self._execute_sell(pair, holding, reason)
 
                     # === 保有なしの場合: 買いを検討 ===
                     else:
@@ -531,12 +551,12 @@ class Trader:
                         if tracker.entry_price > 0:
                             tracker.clear_entry()
 
-                        # 資金チェック
+                        # 資金チェック（概算）
                         min_cost = cfg.min_size * price * (1 + TRADING_FEE)
                         available = jpy_balance - MIN_CASH_RESERVE
 
                         if available < min_cost:
-                            await asyncio.sleep(PRICE_FETCH_DELAY)
+                            # 資金不足でスキップ
                             continue
 
                         if not self._can_trade(pair):
@@ -545,29 +565,16 @@ class Trader:
 
                         should_buy, reason = self._get_buy_signal(pair)
                         if should_buy:
-                            # 購入前に最新残高を取得
-                            fresh_balances = await self._get_balances(force=True)
-                            jpy_available = fresh_balances.get("JPY", 0) - MIN_CASH_RESERVE
-
-                            if jpy_available < min_cost:
-                                await asyncio.sleep(PRICE_FETCH_DELAY)
-                                continue
-
-                            # 購入サイズを計算
-                            budget = min(jpy_available * POSITION_RATIO, jpy_available - MIN_CASH_RESERVE)
+                            # 購入サイズを計算（概算）
+                            budget = min(available * POSITION_RATIO, available)
                             if budget < min_cost:
                                 budget = min_cost
 
                             size = budget / price
                             size = max(cfg.min_size, size)
 
-                            # 実際のコストを再計算
-                            actual_cost = size * price * (1 + TRADING_FEE)
-                            if actual_cost > jpy_available:
-                                size = (jpy_available / (1 + TRADING_FEE)) / price
-
-                            if size >= cfg.min_size:
-                                await self._execute_buy(pair, size, reason)
+                            # _execute_buy内で最終的な残高チェックを行う
+                            await self._execute_buy(pair, size, reason)
 
                     # API制限対策の待機
                     await asyncio.sleep(PRICE_FETCH_DELAY)
