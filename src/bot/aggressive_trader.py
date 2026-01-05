@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-    🏆 ULTIMATE AI TRADER v9.0 - 最強高利益システム
+    🏆 ULTIMATE AI TRADER v9.1 - 高利益アグレッシブ版
 ================================================================================
-    - 安定したRSI計算
-    - 最小保有時間で手数料負け防止
-    - 精密な売却サイズ計算
+    - 積極的な利確（0.6%）・損切り（0.4%）
+    - 急騰時即利確機能
+    - 反発検知・モメンタム売買
+    - RSI安定性維持（期間14）
 ================================================================================
 """
 
@@ -35,25 +36,25 @@ from src.api.bitflyer_client import BitFlyerClient, OrderSide, OrderType
 
 
 # =============================================================================
-# 設定
+# 設定 - 高利益アグレッシブ版
 # =============================================================================
 
 TRADING_FEE = 0.0015
-TAKE_PROFIT = 0.01           # 1.0%で利確
-STOP_LOSS = 0.008            # 0.8%で損切り
-MIN_HOLD_TIME = 180          # 最低3分保有（手数料負け防止）
-TRADE_COOLDOWN = 60          # 60秒クールダウン
-FAIL_COOLDOWN = 120          # 失敗後2分待機
+TAKE_PROFIT = 0.006          # 0.6%で利確（手数料0.3%差引後0.3%利益）
+STOP_LOSS = 0.004            # 0.4%で損切り（素早く撤退）
+MIN_HOLD_TIME = 45           # 最低45秒（急騰対応可能）
+TRADE_COOLDOWN = 30          # 30秒クールダウン
+FAIL_COOLDOWN = 60           # 失敗後1分待機
 
 # API設定
-PRICE_DELAY = 2.0
-LOOP_DELAY = 5
-STATUS_INTERVAL = 30
+PRICE_DELAY = 1.5
+LOOP_DELAY = 3
+STATUS_INTERVAL = 20
 
 # テクニカル
-RSI_PERIOD = 14              # 標準RSI期間
-RSI_BUY = 35                 # RSI35以下で買い
-RSI_SELL = 65                # RSI65以上で売り検討
+RSI_PERIOD = 14              # 標準RSI期間（安定性維持）
+RSI_BUY = 42                 # RSI42以下で買い（機会増加）
+RSI_SELL = 58                # RSI58以上で売り検討
 
 
 # =============================================================================
@@ -332,50 +333,61 @@ class Trader:
         if price > pos.highest:
             pos.highest = price
 
-        # 最低保有時間チェック
+        # 緊急損切り（いつでも）
+        if pnl <= -0.015:  # -1.5%
+            return True, f"緊急損切り {pnl*100:.2f}%"
+
+        # 最低保有時間チェック（ただし大きな利益は即確定）
         if hold_time < MIN_HOLD_TIME:
-            # 大きな損失の場合のみ早期損切り
-            if pnl <= -0.02:  # -2%
-                return True, f"緊急損切り {pnl*100:.2f}%"
+            # 急騰時は即利確
+            if pnl >= 0.008:  # +0.8%以上
+                return True, f"急騰利確 +{pnl*100:.2f}%"
             return False, ""
 
-        # 利確（1.0%以上）
+        # 利確
         if pnl >= TAKE_PROFIT:
             return True, f"利確 +{pnl*100:.2f}%"
 
-        # 損切り（-0.8%以下）
+        # 損切り
         if pnl <= -STOP_LOSS:
             return True, f"損切り {pnl*100:.2f}%"
 
-        # トレーリング（高値から0.5%下落、かつ利益あり）
-        if pos.highest > 0 and pnl > 0.005:
+        # トレーリング（高値から0.3%下落、かつ利益あり）
+        if pos.highest > 0 and pnl > 0.003:
             drop = (pos.highest - price) / pos.highest
-            if drop > 0.005:
+            if drop > 0.003:
                 return True, f"トレール +{pnl*100:.2f}%"
 
-        # RSI売りシグナル + 利益あり + 長期保有
+        # RSI売りシグナル + 少しでも利益あり
         rsi = analyzer.rsi()
-        if rsi and rsi > RSI_SELL and pnl > 0.003 and hold_time > 300:
+        if rsi and rsi > RSI_SELL and pnl > 0.002 and hold_time > 60:
             return True, f"RSI={rsi:.0f} +{pnl*100:.2f}%"
 
         return False, ""
 
     def should_buy(self, pair: str) -> tuple:
         analyzer = self.analyzers.get(pair)
-        if not analyzer or len(analyzer.prices) < 20:
+        if not analyzer or len(analyzer.prices) < 15:
             return False, ""
 
         rsi = analyzer.rsi()
         trend = analyzer.trend_pct()
 
-        # RSI低め + 上昇トレンド
+        # RSI低め（買いチャンス）
         if rsi and rsi < RSI_BUY:
-            if trend and trend > 0:
-                return True, f"RSI={rsi:.0f} ↑{trend:.2f}%"
+            if trend is None or trend > -0.3:  # 急落中でなければOK
+                return True, f"RSI={rsi:.0f} 買い時"
 
-        # 強い上昇（0.5%以上）
-        if trend and trend > 0.5:
-            return True, f"急騰 +{trend:.2f}%"
+        # 上昇トレンド（モメンタム）
+        if trend and trend > 0.3:
+            if rsi is None or rsi < 65:  # 過熱してなければOK
+                return True, f"上昇 +{trend:.2f}%"
+
+        # 反発シグナル（下落後の上昇開始）
+        if len(analyzer.prices) >= 5:
+            recent = list(analyzer.prices)[-5:]
+            if recent[-1] > recent[-2] > recent[-3] and recent[-3] < recent[-4]:
+                return True, f"反発検知"
 
         return False, ""
 
@@ -389,9 +401,9 @@ class Trader:
 
         logger.info("")
         logger.info("╔══════════════════════════════════════════════════════════╗")
-        logger.info("║  🏆 ULTIMATE AI TRADER v9.0 - 最強高利益システム        ║")
+        logger.info("║  🏆 ULTIMATE AI TRADER v9.1 - 高利益アグレッシブ版      ║")
         logger.info("╠══════════════════════════════════════════════════════════╣")
-        logger.info(f"║  利確: {TAKE_PROFIT*100:.1f}% | 損切: {STOP_LOSS*100:.1f}% | 最低保有: {MIN_HOLD_TIME}秒      ║")
+        logger.info(f"║  利確: +{TAKE_PROFIT*100:.1f}% | 損切: -{STOP_LOSS*100:.1f}% | 急騰: 即利確       ║")
         logger.info("╚══════════════════════════════════════════════════════════╝")
 
         for pair, cfg in sorted(PAIRS.items(), key=lambda x: x[1].priority):
