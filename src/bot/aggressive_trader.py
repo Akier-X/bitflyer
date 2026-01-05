@@ -47,6 +47,11 @@ TRADE_COOLDOWN = 5          # 5秒のクールダウン
 POSITION_RATIO = 0.35       # 現金の35%を1取引に使用
 MIN_CASH_RESERVE = 50       # 最低50円は残す
 
+# API制限対策
+BALANCE_REFRESH_INTERVAL = 30   # 残高は30秒ごとに更新
+PRICE_FETCH_DELAY = 1.0         # 価格取得間隔: 1秒
+LOOP_INTERVAL = 3               # メインループ: 3秒
+
 # テクニカル設定
 RSI_PERIOD = 7
 RSI_BUY = 35                # 買いシグナル閾値
@@ -166,6 +171,10 @@ class Trader:
         self.trackers: Dict[str, PriceTracker] = {}
         self.last_trade: Dict[str, datetime] = {}
 
+        # 残高キャッシュ
+        self._cached_balances: Dict[str, float] = {}
+        self._balance_last_update: Optional[datetime] = None
+
         # 統計
         self.trades = 0
         self.wins = 0
@@ -173,8 +182,14 @@ class Trader:
         self.initial_value = 0.0
         self.start_time = None
 
-    async def _get_balances(self) -> Dict[str, float]:
-        """APIから実残高を取得"""
+    async def _get_balances(self, force: bool = False) -> Dict[str, float]:
+        """APIから実残高を取得（キャッシュ付き）"""
+        # キャッシュが有効なら使用
+        if not force and self._balance_last_update:
+            elapsed = (datetime.now() - self._balance_last_update).total_seconds()
+            if elapsed < BALANCE_REFRESH_INTERVAL and self._cached_balances:
+                return self._cached_balances
+
         result = {}
         try:
             client = list(self.clients.values())[0]
@@ -185,10 +200,15 @@ class Trader:
                     amount = float(b.get("available", 0))
                     if amount > 0:
                         result[currency] = amount
+                # キャッシュ更新
+                self._cached_balances = result
+                self._balance_last_update = datetime.now()
         except asyncio.TimeoutError:
             logger.warning("残高取得タイムアウト")
+            return self._cached_balances  # キャッシュを返す
         except Exception as e:
             logger.error(f"残高取得エラー: {e}")
+            return self._cached_balances  # キャッシュを返す
         return result
 
     async def _get_price(self, pair: str) -> Optional[float]:
@@ -469,7 +489,7 @@ class Trader:
             while True:
                 tick += 1
 
-                # === 1. 残高とポジションを取得 ===
+                # === 1. 残高を取得（キャッシュ使用） ===
                 balances = await self._get_balances()
                 jpy_balance = balances.get("JPY", 0)
 
@@ -485,6 +505,7 @@ class Trader:
                     # 価格を取得して記録
                     price = await self._get_price(pair)
                     if not price:
+                        await asyncio.sleep(PRICE_FETCH_DELAY)
                         continue
                     tracker.add_price(price)
 
@@ -493,11 +514,16 @@ class Trader:
                     # === 保有中の場合: 売りを検討 ===
                     if has_position:
                         if not self._can_trade(pair):
+                            await asyncio.sleep(PRICE_FETCH_DELAY)
                             continue
 
                         should_sell, reason = self._get_sell_signal(pair, price)
                         if should_sell:
-                            await self._execute_sell(pair, holding, reason)
+                            # 売却前に最新残高を取得
+                            fresh_balances = await self._get_balances(force=True)
+                            actual_holding = fresh_balances.get(currency, 0)
+                            if actual_holding >= cfg.min_size:
+                                await self._execute_sell(pair, actual_holding, reason)
 
                     # === 保有なしの場合: 買いを検討 ===
                     else:
@@ -510,15 +536,25 @@ class Trader:
                         available = jpy_balance - MIN_CASH_RESERVE
 
                         if available < min_cost:
+                            await asyncio.sleep(PRICE_FETCH_DELAY)
                             continue
 
                         if not self._can_trade(pair):
+                            await asyncio.sleep(PRICE_FETCH_DELAY)
                             continue
 
                         should_buy, reason = self._get_buy_signal(pair)
                         if should_buy:
+                            # 購入前に最新残高を取得
+                            fresh_balances = await self._get_balances(force=True)
+                            jpy_available = fresh_balances.get("JPY", 0) - MIN_CASH_RESERVE
+
+                            if jpy_available < min_cost:
+                                await asyncio.sleep(PRICE_FETCH_DELAY)
+                                continue
+
                             # 購入サイズを計算
-                            budget = min(available * POSITION_RATIO, available - MIN_CASH_RESERVE)
+                            budget = min(jpy_available * POSITION_RATIO, jpy_available - MIN_CASH_RESERVE)
                             if budget < min_cost:
                                 budget = min_cost
 
@@ -527,21 +563,21 @@ class Trader:
 
                             # 実際のコストを再計算
                             actual_cost = size * price * (1 + TRADING_FEE)
-                            if actual_cost > available:
-                                size = (available / (1 + TRADING_FEE)) / price
+                            if actual_cost > jpy_available:
+                                size = (jpy_available / (1 + TRADING_FEE)) / price
 
                             if size >= cfg.min_size:
                                 await self._execute_buy(pair, size, reason)
 
-                    # 少し待機（API制限対策）
-                    await asyncio.sleep(0.2)
+                    # API制限対策の待機
+                    await asyncio.sleep(PRICE_FETCH_DELAY)
 
                 # === 3. ステータス表示 ===
                 if tick % status_interval == 0:
                     self._log_status()
 
                 # メインループ待機
-                await asyncio.sleep(1)
+                await asyncio.sleep(LOOP_INTERVAL)
 
         except KeyboardInterrupt:
             logger.info("")
