@@ -1,5 +1,4 @@
 """bitFlyer API Module"""
-from .client import BitFlyerClient
-from .websocket_client import BitFlyerWebSocket
+from .bitflyer_client import BitFlyerClient, MockBitFlyerClient
 
-__all__ = ["BitFlyerClient", "BitFlyerWebSocket"]
+__all__ = ["BitFlyerClient", "MockBitFlyerClient"]
