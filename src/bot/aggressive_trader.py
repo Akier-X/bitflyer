@@ -14,6 +14,7 @@
 """
 
 import asyncio
+import math
 import sys
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
@@ -290,9 +291,11 @@ class Trader:
         currency = pair.replace("_JPY", "")
         actual_holding = balances.get(currency, 0)
 
-        # 実際に保有している量を使用
+        # 実際に保有している量を使用（切り捨てで安全側に）
         size = min(size, actual_holding)
-        size = round(size, cfg.decimals)
+        # round()ではなく切り捨て（floor）を使用して残高超過を防止
+        multiplier = 10 ** cfg.decimals
+        size = math.floor(size * multiplier) / multiplier
 
         if size < cfg.min_size:
             logger.debug(f"  SELL {pair} スキップ: 保有不足 ({actual_holding} < {cfg.min_size})")
