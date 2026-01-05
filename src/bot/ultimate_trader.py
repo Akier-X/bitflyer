@@ -457,17 +457,19 @@ class UltimateTrader:
         currency = pair.replace("_JPY", "")
         holding = balances.get(currency, 0)
 
-        # 安全な売却サイズ（99%で計算）
+        # 手数料を考慮した安全な売却サイズ計算
+        # bitFlyer手数料は別途JPYから引かれるため、保有量ギリギリでも売却可能
         multiplier = 10 ** cfg.decimals
-        size = math.floor(holding * 0.99 * multiplier) / multiplier
 
-        # 最小取引量以上保有していて、計算結果が最小未満なら最小で売却
-        if size < cfg.min_size and holding >= cfg.min_size:
-            size = cfg.min_size
+        # 小数点以下を切り捨てた売却サイズ
+        size = math.floor(holding * multiplier) / multiplier
 
+        # 最小取引量チェック
         if size < cfg.min_size:
-            logger.debug(f"  {currency}: 売却不可（保有={holding}, 最小={cfg.min_size}）")
+            logger.debug(f"  {currency}: 売却不可（保有={holding:.8f}, 最小={cfg.min_size}）")
             return False
+
+        logger.info(f"  📊 売却計算: 保有={holding:.8f}, 売却サイズ={size}")
 
         price = await self.get_price(pair)
         if not price:
@@ -650,18 +652,13 @@ class UltimateTrader:
             total += value
 
             if amount > 0:
-                # APIからの正確な値で計算
+                # 売却可能量計算（手数料はJPYから引かれるため、保有量をそのまま使用）
                 multiplier = 10 ** cfg.decimals
 
-                # 売却可能量を計算（99%で計算、ただし最小取引量は確保）
-                sellable_raw = amount * 0.99
-                sellable = math.floor(sellable_raw * multiplier) / multiplier
+                # 小数点以下を切り捨て
+                sellable = math.floor(amount * multiplier) / multiplier
 
-                # 最小取引量以上保有していて、計算結果が最小未満なら最小で売却
-                if sellable < cfg.min_size and amount >= cfg.min_size:
-                    sellable = cfg.min_size
-
-                logger.info(f"  📊 {currency}: 保有={amount}, 売却可能={sellable}, 最小={cfg.min_size}")
+                logger.info(f"  📊 {currency}: 保有={amount:.8f}, 売却可能={sellable}, 最小={cfg.min_size}")
 
                 # 最小取引量以上なら保有ポジションとして登録
                 if sellable >= cfg.min_size:
