@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-    🏆 ULTIMATE AI TRADER v11.0 - 世界最強・絶対無敗AIトレーダー
+    🏆 ULTIMATE AI TRADER v12.0 - 世界最強・絶対無敗AIトレーダー
 ================================================================================
     全機能統合版:
     - MACD / ボリンジャーバンド / RSI / 複数時間足
@@ -11,6 +11,7 @@
     - パターン認識
     - 適応型パラメータ
     - 🛡️ BULLETPROOF ORDER SYSTEM (絶対残高不足エラーなし)
+    - 🧠 MARKET INTELLIGENCE (マルチペア相関・ボラ適応・時間帯学習・感情分析)
 ================================================================================
 """
 
@@ -39,6 +40,7 @@ from config.settings import get_config
 from src.api.bitflyer_client import BitFlyerClient, OrderSide, OrderType
 from src.analysis.indicators import TechnicalIndicators
 from src.analysis.ml_predictor import EnsemblePredictor, Prediction
+from src.analysis.market_intelligence import MarketIntelligence, MarketState, TradingSignal
 from src.notifications.line_notify import SmartNotifier, TradeNotification, DailyReport
 
 # WebSocket (オプション)
@@ -156,7 +158,7 @@ class TradeRecord:
 # =============================================================================
 
 class UltimateTrader:
-    """世界最強AIトレーダー"""
+    """世界最強AIトレーダー v12.0"""
 
     def __init__(self):
         self.config = get_config()
@@ -166,6 +168,9 @@ class UltimateTrader:
         self.indicators: Dict[str, TechnicalIndicators] = {}
         self.predictors: Dict[str, EnsemblePredictor] = {}
         self.positions: Dict[str, Position] = {}
+
+        # 🧠 Market Intelligence（統合市場分析）
+        self.market_intel = MarketIntelligence()
 
         # WebSocket
         self.ws: Optional[MultiPairWebSocket] = None
@@ -520,12 +525,18 @@ class UltimateTrader:
         return take_profit, stop_loss
 
     # =========================================================================
-    # AI分析
+    # 🧠 AI分析 + Market Intelligence 統合
     # =========================================================================
 
     def analyze(self, pair: str, price: float) -> Tuple[str, float, str]:
         """
-        AI統合分析
+        🧠 AI統合分析 + Market Intelligence
+        - テクニカル分析
+        - ML予測
+        - マルチペア相関
+        - ボラティリティ適応
+        - 時間帯パターン
+        - 市場感情
         Returns: (シグナル, 信頼度, 理由)
         """
         indicators = self.indicators.get(pair)
@@ -534,15 +545,16 @@ class UltimateTrader:
         if not indicators:
             return "NEUTRAL", 0.0, "データなし"
 
-        # 価格追加
+        # === 価格追加（全システムに） ===
         indicators.add_price(price)
         if predictor:
             predictor.add_price(price)
+        self.market_intel.update(pair, price)
 
-        # テクニカル分析
+        # === 1. テクニカル分析 ===
         tech_signal, tech_conf, tech_reason = indicators.composite_signal()
 
-        # ML予測
+        # === 2. ML予測 ===
         ml_signal = "NEUTRAL"
         ml_conf = 0.0
         ml_reason = ""
@@ -554,24 +566,58 @@ class UltimateTrader:
                 ml_conf = prediction.confidence
                 ml_reason = f"AI予測:{prediction.predicted_change:+.2f}%"
 
-        # 統合
-        if tech_signal == ml_signal and tech_signal != "NEUTRAL":
-            # 一致 = 高信頼度
-            combined_conf = tech_conf * TECH_WEIGHT + ml_conf * ML_WEIGHT + 0.2
-            combined_reason = f"{tech_reason} {ml_reason}"
-            return tech_signal, min(combined_conf, 1.0), combined_reason
+        # === 3. Market Intelligence シグナル ===
+        intel_signal = self.market_intel.get_trading_signal(pair, price)
+        market_state = self.market_intel.get_market_state()
 
-        elif tech_conf > ml_conf * 1.5:
-            # テクニカル優勢
-            return tech_signal, tech_conf * 0.8, tech_reason
+        # === 4. 統合スコア計算 ===
+        # 各シグナルをスコア化
+        def signal_to_score(sig: str) -> float:
+            return {"BUY": 1.0, "UP": 1.0, "SELL": -1.0, "DOWN": -1.0}.get(sig, 0.0)
 
-        elif ml_conf > tech_conf * 1.5 and ml_conf > 0.5:
-            # ML優勢
-            return ml_signal, ml_conf * 0.7, ml_reason
+        tech_score = signal_to_score(tech_signal) * tech_conf * TECH_WEIGHT
+        ml_score = signal_to_score(ml_signal) * ml_conf * ML_WEIGHT
+        intel_score = signal_to_score(intel_signal.direction) * intel_signal.strength * 0.3
 
+        combined_score = tech_score + ml_score + intel_score
+
+        # === 5. 市場状態による調整 ===
+        # 極端な感情時は慎重に
+        if market_state.sentiment in ["EXTREME_FEAR", "EXTREME_GREED"]:
+            combined_score *= 0.7
+
+        # ボラティリティ高い時は信頼度下げる
+        if market_state.volatility_regime == "EXTREME":
+            combined_score *= 0.6
+        elif market_state.volatility_regime == "HIGH":
+            combined_score *= 0.8
+
+        # 相関乖離時はチャンス
+        if market_state.correlation_state == "DIVERGING":
+            combined_score *= 1.2
+
+        # === 6. 最終シグナル決定 ===
+        reasons = []
+        if tech_reason:
+            reasons.append(tech_reason)
+        if ml_reason:
+            reasons.append(ml_reason)
+        if intel_signal.reasons:
+            reasons.extend(intel_signal.reasons[:2])
+
+        combined_reason = " ".join(reasons)
+
+        if combined_score > 0.3:
+            return "BUY", min(abs(combined_score), 1.0), combined_reason
+        elif combined_score < -0.3:
+            return "SELL", min(abs(combined_score), 1.0), combined_reason
         else:
-            # 不一致 = 慎重に
-            return "NEUTRAL", 0.0, "シグナル不一致"
+            return "NEUTRAL", 0.0, "シグナル弱い"
+
+    def get_size_multiplier(self, pair: str, price: float) -> float:
+        """Market Intelligenceからサイズ調整倍率を取得"""
+        intel_signal = self.market_intel.get_trading_signal(pair, price)
+        return intel_signal.suggested_size_mult
 
     # =========================================================================
     # 売買判断
@@ -684,6 +730,15 @@ class UltimateTrader:
         if size <= 0:
             logger.debug(f"  {currency}: 安全サイズ計算失敗")
             return False
+
+        # === STEP 2.5: Market Intelligence サイズ調整 ===
+        size_mult = self.get_size_multiplier(pair, price)
+        if size_mult < 1.0:
+            size = size * size_mult
+            size = math.floor(size * (10 ** cfg.decimals)) / (10 ** cfg.decimals)
+            if size < cfg.min_size:
+                logger.debug(f"  {currency}: MI調整後サイズ不足")
+                return False
 
         # === STEP 3: リトライループ（最大3回） ===
         for attempt in range(MAX_ORDER_RETRIES):
@@ -871,6 +926,10 @@ class UltimateTrader:
                         pnl=net, pnl_pct=pct, reason=reason, timestamp=datetime.now()
                     ))
 
+                    # 🧠 Market Intelligence 学習記録
+                    hold_time = pos.hold_seconds() if pos else 0
+                    self.market_intel.record_trade_result(pair, net, pct, hold_time)
+
                     if pair in self.positions:
                         del self.positions[pair]
                     self._balances = {}
@@ -955,9 +1014,10 @@ class UltimateTrader:
 
         logger.info("")
         logger.info("╔══════════════════════════════════════════════════════════════╗")
-        logger.info("║  🏆 ULTIMATE AI TRADER v11.0 - 世界最強・絶対無敗トレーダー ║")
+        logger.info("║  🏆 ULTIMATE AI TRADER v12.0 - 世界最強・絶対無敗トレーダー ║")
         logger.info("╠══════════════════════════════════════════════════════════════╣")
         logger.info("║  🛡️ BULLETPROOF ORDER SYSTEM - Insufficient funds 完全防止  ║")
+        logger.info("║  🧠 MARKET INTELLIGENCE - 相関/ボラ適応/時間帯/感情分析     ║")
         logger.info("║  MACD | ボリンジャー | RSI | 複数時間足 | LSTM | LINE通知   ║")
         logger.info("╚══════════════════════════════════════════════════════════════╝")
 
@@ -1068,6 +1128,20 @@ class UltimateTrader:
         logger.info("")
         logger.info("  ══════════════════════════════════════════════════════════════")
         logger.info("  📊 【AI戦況】")
+
+        # 🧠 Market Intelligence 状態表示
+        try:
+            state = self.market_intel.get_market_state()
+            fgi = self.market_intel.sentiment.get_fear_greed_index()
+
+            vol_emoji = {"LOW": "😴", "NORMAL": "📊", "HIGH": "⚡", "EXTREME": "🔥"}.get(state.volatility_regime, "📊")
+            sent_emoji = {"EXTREME_FEAR": "😱", "FEAR": "😰", "NEUTRAL": "😐", "GREED": "🤑", "EXTREME_GREED": "🚀"}.get(state.sentiment, "😐")
+
+            logger.info(f"  🧠 市場: {vol_emoji}{state.volatility_regime} | {sent_emoji}FGI:{fgi:.0f} | {state.time_regime}")
+        except:
+            pass
+
+        logger.info("  ──────────────────────────────────────────────────────────────")
 
         unrealized = 0.0
 
