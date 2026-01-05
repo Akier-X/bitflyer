@@ -341,17 +341,22 @@ class MLPredictor:
             pass
 
     def _load_model(self):
-        """モデル読み込み"""
+        """モデル読み込み（サイズ不一致時はスキップ）"""
         try:
             if self.model_path.exists():
                 with open(self.model_path, 'r') as f:
                     model_data = json.load(f)
-                self.rnn.Wxh = np.array(model_data['Wxh'])
-                self.rnn.Whh = np.array(model_data['Whh'])
-                self.rnn.Why = np.array(model_data['Why'])
-                self.rnn.bh = np.array(model_data['bh'])
-                self.rnn.by = np.array(model_data['by'])
-                self.is_trained = model_data.get('is_trained', False)
+
+                # サイズチェック
+                Wxh = np.array(model_data['Wxh'])
+                if Wxh.shape == self.rnn.Wxh.shape:
+                    self.rnn.Wxh = Wxh
+                    self.rnn.Whh = np.array(model_data['Whh'])
+                    self.rnn.Why = np.array(model_data['Why'])
+                    self.rnn.bh = np.array(model_data['bh'])
+                    self.rnn.by = np.array(model_data['by'])
+                    self.is_trained = model_data.get('is_trained', False)
+                # サイズ不一致時は新規モデルを使用
         except:
             pass
 
