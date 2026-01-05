@@ -5,14 +5,15 @@
 ================================================================================
     現在の保有コインを活用して利益を最大化
 
-    現在の状況:
+    実際の保有状況 (総資産: ¥6,000):
     - 現金: ¥920
-    - XRP: 5.57個 (約¥1,872) → 利確/損切り対象
+    - XLM: 84.89個 (¥3,144) → メイン利確対象
+    - XRP: 5.57個 (¥1,888) → 利確対象
     - ETH: 微量 (売却不可)
 
     戦略:
-    - XRPポジションの利確を狙う
-    - MONAで小額トレード (¥14/個)
+    - XLM/XRPポジションの利確を狙う
+    - DOGE/MONA/FLRで小額トレード
     - 資金が増えたらETH/BTCへ
 ================================================================================
 """
@@ -71,11 +72,15 @@ class PairConfig:
     priority: int
 
 
+# 保有コインを優先 + 低価格コイン
 PAIRS = {
-    "XRP_JPY": PairConfig("XRP_JPY", 1.0, 6, 1),
-    "MONA_JPY": PairConfig("MONA_JPY", 1.0, 6, 2),
-    "ETH_JPY": PairConfig("ETH_JPY", 0.01, 7, 3),
-    "BTC_JPY": PairConfig("BTC_JPY", 0.001, 8, 4),
+    "XLM_JPY": PairConfig("XLM_JPY", 1.0, 6, 1),      # 保有中: 84.89 XLM
+    "XRP_JPY": PairConfig("XRP_JPY", 1.0, 6, 2),      # 保有中: 5.57 XRP
+    "DOGE_JPY": PairConfig("DOGE_JPY", 1.0, 6, 3),    # ¥24/個 - 低価格
+    "MONA_JPY": PairConfig("MONA_JPY", 1.0, 6, 4),    # ¥14/個 - 低価格
+    "FLR_JPY": PairConfig("FLR_JPY", 1.0, 6, 5),      # ¥1.9/個 - 超低価格
+    "ETH_JPY": PairConfig("ETH_JPY", 0.01, 7, 6),
+    "BTC_JPY": PairConfig("BTC_JPY", 0.001, 8, 7),
 }
 
 
