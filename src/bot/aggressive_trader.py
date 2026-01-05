@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-    🏆 ULTIMATE AI TRADER v9.1 - 高利益アグレッシブ版
+    🏆 ULTIMATE AI TRADER v9.2 - 高利益アグレッシブ版 (BULLETPROOF)
 ================================================================================
     - 積極的な利確（0.6%）・損切り（0.4%）
     - 急騰時即利確機能
     - 反発検知・モメンタム売買
     - RSI安定性維持（期間14）
+    - 🛡️ BULLETPROOF ORDER SYSTEM (Insufficient funds 完全防止)
 ================================================================================
 """
 
@@ -55,6 +56,18 @@ STATUS_INTERVAL = 20
 RSI_PERIOD = 14              # 標準RSI期間（安定性維持）
 RSI_BUY = 42                 # RSI42以下で買い（機会増加）
 RSI_SELL = 58                # RSI58以上で売り検討
+
+# =============================================================================
+# 🛡️ BULLETPROOF ORDER SYSTEM - 絶対安全設定
+# =============================================================================
+
+SAFETY_MARGIN_BUY = 0.05     # 購入時5%の余裕
+SAFETY_MARGIN_SELL = 0.02    # 売却時2%の余裕
+JPY_RESERVE = 100            # 常に¥100を残す
+MAX_BUDGET_RATIO = 0.90      # 最大投資比率90%
+MAX_ORDER_RETRIES = 3        # 最大リトライ回数
+RETRY_SIZE_REDUCTION = 0.90  # リトライ時のサイズ縮小率
+BALANCE_CACHE_TTL = 5        # 残高キャッシュ有効期限（5秒）
 
 
 # =============================================================================
@@ -159,8 +172,9 @@ class Trader:
         self.start_time: Optional[datetime] = None
 
     async def get_balances(self, force: bool = False) -> Dict[str, float]:
+        """🛡️ BULLETPROOF残高取得（5秒キャッシュ）"""
         if not force and self._balance_time:
-            if (datetime.now() - self._balance_time).seconds < 30:
+            if (datetime.now() - self._balance_time).seconds < BALANCE_CACHE_TTL:
                 return self._balances
         try:
             client = next(iter(self.clients.values()))
@@ -174,6 +188,19 @@ class Trader:
         except:
             pass
         return self._balances
+
+    async def get_fresh_balance(self, currency: str = "JPY") -> float:
+        """🛡️ 絶対最新の残高を取得（キャッシュ無視）"""
+        try:
+            client = next(iter(self.clients.values()))
+            data = await asyncio.wait_for(client.get_balance(), timeout=10)
+            if data:
+                for b in data:
+                    if b.get("currency_code") == currency:
+                        return float(b.get("available", 0))
+        except:
+            pass
+        return 0.0
 
     async def get_price(self, pair: str) -> Optional[float]:
         client = self.clients.get(pair)
@@ -197,63 +224,108 @@ class Trader:
         return True
 
     async def execute_buy(self, pair: str, reason: str) -> bool:
+        """🛡️ BULLETPROOF購入 - Insufficient fundsエラー完全防止"""
         cfg = PAIRS.get(pair)
         client = self.clients.get(pair)
         if not cfg or not client or not self.can_trade(pair):
             return False
 
+        currency = pair.replace("_JPY", "")
+
+        # === STEP 1: 初回残高チェック ===
         balances = await self.get_balances(force=True)
-        jpy = balances.get("JPY", 0) - 50
-        if jpy < 30:
+        jpy = balances.get("JPY", 0)
+        if jpy < JPY_RESERVE + 50:
             return False
 
         price = await self.get_price(pair)
         if not price:
             return False
 
-        budget = jpy * 0.5
+        # === STEP 2: 安全サイズ計算（5%マージン込み） ===
+        available_jpy = jpy - JPY_RESERVE
+        budget = available_jpy * 0.5 * (1 - SAFETY_MARGIN_BUY)  # 50%の投資で5%マージン
         size = budget / price
-        size = round(size, cfg.decimals)
+        size = math.floor(size * (10 ** cfg.decimals)) / (10 ** cfg.decimals)
+
         if size < cfg.min_size:
-            size = cfg.min_size
-
-        cost = size * price * 1.002
-        if cost > jpy:
-            return False
-
-        currency = pair.replace("_JPY", "")
-        logger.info(f"")
-        logger.info(f"  🛒 【購入】{currency}")
-        logger.info(f"     数量: {size} @ ¥{price:,.0f}")
-        logger.info(f"     理由: {reason}")
-
-        try:
-            order_id = await asyncio.wait_for(
-                client.send_order(OrderSide.BUY, size, OrderType.MARKET),
-                timeout=20
-            )
-            if order_id:
-                self.last_trade[pair] = datetime.now()
-                self.trades += 1
-                self.positions[pair] = Position(
-                    pair=pair, size=size, entry_price=price,
-                    entry_time=datetime.now(), highest=price
-                )
-                self._balances = {}
-                logger.info(f"  ✅ 購入成功！ 投資額: ¥{cost:,.0f}")
-                return True
+            min_cost = cfg.min_size * price * (1 + SAFETY_MARGIN_BUY)
+            if min_cost <= available_jpy:
+                size = cfg.min_size
             else:
+                return False
+
+        # === STEP 3: リトライループ（最大3回） ===
+        for attempt in range(MAX_ORDER_RETRIES):
+            fresh_jpy = await self.get_fresh_balance("JPY")
+            final_cost = size * price * (1 + SAFETY_MARGIN_BUY)
+            available = fresh_jpy - JPY_RESERVE
+
+            if final_cost > available:
+                if attempt < MAX_ORDER_RETRIES - 1:
+                    size = size * RETRY_SIZE_REDUCTION
+                    size = math.floor(size * (10 ** cfg.decimals)) / (10 ** cfg.decimals)
+                    if size < cfg.min_size:
+                        return False
+                    continue
+                else:
+                    return False
+
+            if attempt == 0:
+                logger.info(f"")
+                logger.info(f"  🛒 【購入】{currency}")
+                logger.info(f"     数量: {size} @ ¥{price:,.0f}")
+                logger.info(f"     安全コスト: ¥{final_cost:,.0f} (5%マージン込み)")
+                logger.info(f"     理由: {reason}")
+
+            try:
+                order_id = await asyncio.wait_for(
+                    client.send_order(OrderSide.BUY, size, OrderType.MARKET),
+                    timeout=20
+                )
+                if order_id:
+                    self.last_trade[pair] = datetime.now()
+                    self.trades += 1
+                    self.positions[pair] = Position(
+                        pair=pair, size=size, entry_price=price,
+                        entry_time=datetime.now(), highest=price
+                    )
+                    self._balances = {}
+                    logger.info(f"  ✅ 購入成功！ 投資額: ¥{size * price:,.0f}")
+                    return True
+                else:
+                    if attempt < MAX_ORDER_RETRIES - 1:
+                        size = size * RETRY_SIZE_REDUCTION
+                        size = math.floor(size * (10 ** cfg.decimals)) / (10 ** cfg.decimals)
+                        if size < cfg.min_size:
+                            self.failed[pair] = datetime.now()
+                            return False
+                        logger.info(f"  🔄 {currency}: リトライ ({attempt+1}/{MAX_ORDER_RETRIES})")
+                        await asyncio.sleep(1)
+                    else:
+                        self.failed[pair] = datetime.now()
+                        return False
+            except Exception as e:
+                if attempt < MAX_ORDER_RETRIES - 1:
+                    size = size * RETRY_SIZE_REDUCTION
+                    size = math.floor(size * (10 ** cfg.decimals)) / (10 ** cfg.decimals)
+                    if size >= cfg.min_size:
+                        await asyncio.sleep(1)
+                        continue
                 self.failed[pair] = datetime.now()
-        except:
-            self.failed[pair] = datetime.now()
+                return False
+
         return False
 
     async def execute_sell(self, pair: str, reason: str) -> bool:
+        """🛡️ BULLETPROOF売却 - Insufficient fundsエラー完全防止"""
         cfg = PAIRS.get(pair)
         client = self.clients.get(pair)
         pos = self.positions.get(pair)
         if not cfg or not client or not self.can_trade(pair):
             return False
+
+        currency = pair.replace("_JPY", "")
 
         # キャンセル（静かに）
         try:
@@ -262,17 +334,21 @@ class Trader:
         except:
             pass
 
-        balances = await self.get_balances(force=True)
-        currency = pair.replace("_JPY", "")
-        holding = balances.get(currency, 0)
+        # === STEP 1: 最新残高を取得 ===
+        holding = await self.get_fresh_balance(currency)
+        if holding <= 0:
+            if pair in self.positions:
+                del self.positions[pair]
+            return False
 
-        # 安全な売却サイズ（95%で切り捨て）
-        size = holding * 0.95
+        # === STEP 2: 安全サイズ計算（2%マージン込み） ===
+        safe_holding = holding * (1 - SAFETY_MARGIN_SELL)
         multiplier = 10 ** cfg.decimals
-        size = math.floor(size * multiplier) / multiplier
+        size = math.floor(safe_holding * multiplier) / multiplier
 
-        if size < cfg.min_size:
-            logger.debug(f"  {currency}: 売却可能量不足")
+        if size < cfg.min_size * 1.01:
+            if pair in self.positions:
+                del self.positions[pair]
             return False
 
         price = await self.get_price(pair)
@@ -281,43 +357,78 @@ class Trader:
 
         logger.info(f"")
         logger.info(f"  💰 【売却】{currency}")
-        logger.info(f"     数量: {size} @ ¥{price:,.0f}")
+        logger.info(f"     保有量: {holding:.8f}")
+        logger.info(f"     売却サイズ: {size} (2%マージン適用)")
         logger.info(f"     理由: {reason}")
 
-        try:
-            order_id = await asyncio.wait_for(
-                client.send_order(OrderSide.SELL, size, OrderType.MARKET),
-                timeout=20
-            )
-            if order_id:
-                self.last_trade[pair] = datetime.now()
-                self.trades += 1
+        # === STEP 3: リトライループ（最大3回） ===
+        for attempt in range(MAX_ORDER_RETRIES):
+            fresh_holding = await self.get_fresh_balance(currency)
 
-                entry = pos.entry_price if pos else price
-                gross = (price - entry) * size
-                fee = price * size * TRADING_FEE * 2
-                net = gross - fee
-                pct = (price - entry) / entry * 100 if entry > 0 else 0
+            if size > fresh_holding:
+                safe_holding = fresh_holding * (1 - SAFETY_MARGIN_SELL)
+                size = math.floor(safe_holding * multiplier) / multiplier
+                if size < cfg.min_size:
+                    if attempt < MAX_ORDER_RETRIES - 1:
+                        await asyncio.sleep(1)
+                        continue
+                    else:
+                        if pair in self.positions:
+                            del self.positions[pair]
+                        return False
 
-                self.pnl += net
-                if net > 0:
-                    self.wins += 1
-                    emoji = "💰"
+            try:
+                order_id = await asyncio.wait_for(
+                    client.send_order(OrderSide.SELL, size, OrderType.MARKET),
+                    timeout=20
+                )
+                if order_id:
+                    self.last_trade[pair] = datetime.now()
+                    self.trades += 1
+
+                    entry = pos.entry_price if pos else price
+                    gross = (price - entry) * size
+                    fee = price * size * TRADING_FEE * 2
+                    net = gross - fee
+                    pct = (price - entry) / entry * 100 if entry > 0 else 0
+
+                    self.pnl += net
+                    if net > 0:
+                        self.wins += 1
+                        emoji = "💰"
+                    else:
+                        emoji = "📉"
+
+                    if pair in self.positions:
+                        del self.positions[pair]
+                    self._balances = {}
+
+                    logger.info(f"  {emoji} 売却完了！")
+                    logger.info(f"     損益: ¥{net:+,.0f} ({pct:+.2f}%)")
+                    logger.info(f"     累計: ¥{self.pnl:+,.0f}")
+                    return True
                 else:
-                    emoji = "📉"
-
-                if pair in self.positions:
-                    del self.positions[pair]
-                self._balances = {}
-
-                logger.info(f"  {emoji} 売却完了！")
-                logger.info(f"     損益: ¥{net:+,.0f} ({pct:+.2f}%)")
-                logger.info(f"     累計: ¥{self.pnl:+,.0f}")
-                return True
-            else:
+                    if attempt < MAX_ORDER_RETRIES - 1:
+                        size = size * RETRY_SIZE_REDUCTION
+                        size = math.floor(size * multiplier) / multiplier
+                        if size < cfg.min_size:
+                            self.failed[pair] = datetime.now()
+                            return False
+                        logger.info(f"  🔄 {currency}: リトライ ({attempt+1}/{MAX_ORDER_RETRIES})")
+                        await asyncio.sleep(1)
+                    else:
+                        self.failed[pair] = datetime.now()
+                        return False
+            except:
+                if attempt < MAX_ORDER_RETRIES - 1:
+                    size = size * RETRY_SIZE_REDUCTION
+                    size = math.floor(size * multiplier) / multiplier
+                    if size >= cfg.min_size:
+                        await asyncio.sleep(1)
+                        continue
                 self.failed[pair] = datetime.now()
-        except:
-            self.failed[pair] = datetime.now()
+                return False
+
         return False
 
     def should_sell(self, pair: str, price: float) -> tuple:
