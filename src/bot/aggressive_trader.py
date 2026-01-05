@@ -72,15 +72,13 @@ class PairConfig:
     priority: int
 
 
-# 保有コインを優先 + 低価格コイン
+# 保有コイン優先 (Lightning対応ペアのみ)
 PAIRS = {
-    "XLM_JPY": PairConfig("XLM_JPY", 1.0, 6, 1),      # 保有中: 84.89 XLM
-    "XRP_JPY": PairConfig("XRP_JPY", 1.0, 6, 2),      # 保有中: 5.57 XRP
-    "DOGE_JPY": PairConfig("DOGE_JPY", 1.0, 6, 3),    # ¥24/個 - 低価格
-    "MONA_JPY": PairConfig("MONA_JPY", 1.0, 6, 4),    # ¥14/個 - 低価格
-    "FLR_JPY": PairConfig("FLR_JPY", 1.0, 6, 5),      # ¥1.9/個 - 超低価格
-    "ETH_JPY": PairConfig("ETH_JPY", 0.01, 7, 6),
-    "BTC_JPY": PairConfig("BTC_JPY", 0.001, 8, 7),
+    "XLM_JPY": PairConfig("XLM_JPY", 1.0, 6, 1),      # 保有中: 84.89 XLM ¥3,126
+    "XRP_JPY": PairConfig("XRP_JPY", 1.0, 6, 2),      # 保有中: 5.57 XRP ¥1,872
+    "MONA_JPY": PairConfig("MONA_JPY", 1.0, 6, 3),    # ¥14/個 - 低価格
+    "ETH_JPY": PairConfig("ETH_JPY", 0.01, 7, 4),
+    "BTC_JPY": PairConfig("BTC_JPY", 0.001, 8, 5),
 }
 
 
