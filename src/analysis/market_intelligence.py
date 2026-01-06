@@ -70,7 +70,15 @@ class CorrelationAnalyzer:
         if pair not in self.prices or len(self.prices[pair]) < 10:
             return None
         prices = np.array(list(self.prices[pair]))
+        # ゼロ価格がある場合はスキップ
+        if np.any(prices[:-1] == 0):
+            return None
         returns = np.diff(prices) / prices[:-1]
+        # NaN/Infがある場合は除外
+        if np.any(~np.isfinite(returns)):
+            returns = returns[np.isfinite(returns)]
+            if len(returns) < 5:
+                return None
         return returns
 
     def calculate_correlation(self, pair1: str, pair2: str) -> Optional[float]:
@@ -87,6 +95,10 @@ class CorrelationAnalyzer:
 
         r1 = r1[-min_len:]
         r2 = r2[-min_len:]
+
+        # 標準偏差がゼロの場合は相関計算不可（価格変動なし）
+        if np.std(r1) < 1e-10 or np.std(r2) < 1e-10:
+            return 0.0
 
         # ピアソン相関係数
         corr = np.corrcoef(r1, r2)[0, 1]
@@ -143,6 +155,8 @@ class CorrelationAnalyzer:
             return None
 
         btc_prices = list(self.prices["BTC_JPY"])
+        if btc_prices[-10] == 0:
+            return None
         btc_change = (btc_prices[-1] - btc_prices[-10]) / btc_prices[-10]
 
         # BTCが大きく動いた場合
@@ -189,8 +203,14 @@ class VolatilityAnalyzer:
         if pair not in self.prices or len(self.prices[pair]) < period:
             return None
 
-        prices = list(self.prices[pair])[-period:]
-        returns = np.diff(prices) / np.array(prices[:-1])
+        prices = np.array(list(self.prices[pair])[-period:])
+        # ゼロ価格がある場合はスキップ
+        if np.any(prices[:-1] == 0):
+            return None
+        returns = np.diff(prices) / prices[:-1]
+        # NaN/Infがある場合はスキップ
+        if np.any(~np.isfinite(returns)):
+            return None
 
         return float(np.std(returns))
 
@@ -451,7 +471,7 @@ class SentimentAnalyzer:
 
         if len(self.price_changes[pair]) > 0:
             last_prices = list(self.price_changes[pair])
-            if last_prices:
+            if last_prices and last_prices[-1] != 0:
                 change = (price - last_prices[-1]) / last_prices[-1]
                 self.volume_proxy[pair].append(abs(change))
 
@@ -466,8 +486,13 @@ class SentimentAnalyzer:
             return
 
         prices = list(self.price_changes[pair])
-        recent_change = (price - prices[-5]) / prices[-5] if len(prices) >= 5 else 0
-        avg_volatility = np.std(np.diff(prices) / np.array(prices[:-1])) if len(prices) > 1 else 0.01
+        recent_change = (price - prices[-5]) / prices[-5] if len(prices) >= 5 and prices[-5] != 0 else 0
+        # ゼロ除算を防ぐ
+        prices_arr = np.array(prices[:-1])
+        if len(prices) > 1 and np.all(prices_arr != 0):
+            avg_volatility = np.std(np.diff(prices) / prices_arr)
+        else:
+            avg_volatility = 0.01
 
         # 通常の3倍以上の動き
         if abs(recent_change) > avg_volatility * 3 and abs(recent_change) > 0.005:
@@ -596,8 +621,9 @@ class MarketIntelligence:
         # リターン計算
         if pair in self.correlation.prices and len(self.correlation.prices[pair]) >= 2:
             prices = list(self.correlation.prices[pair])
-            returns = (prices[-1] - prices[-2]) / prices[-2]
-            self.time_pattern.record_price(pair, price, returns)
+            if prices[-2] != 0:
+                returns = (prices[-1] - prices[-2]) / prices[-2]
+                self.time_pattern.record_price(pair, price, returns)
 
     def record_trade_result(self, pair: str, pnl: float, pnl_pct: float, hold_time: int):
         """取引結果記録（学習用）"""
