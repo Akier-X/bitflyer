@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-    🏆 ULTIMATE AI TRADER v12.0 - 世界最強・絶対無敗AIトレーダー
+    🏆 ULTIMATE AI TRADER v13.0 - 世界最強・高利益AIトレーダー
 ================================================================================
     全機能統合版:
     - MACD / ボリンジャーバンド / RSI / 複数時間足
@@ -12,6 +12,7 @@
     - 適応型パラメータ
     - 🛡️ BULLETPROOF ORDER SYSTEM (絶対残高不足エラーなし)
     - 🧠 MARKET INTELLIGENCE (マルチペア相関・ボラ適応・時間帯学習・感情分析)
+    - 💰 PROFIT MAXIMIZER (損小利大・高勝率・トレンドフォロー)
 ================================================================================
 """
 
@@ -52,27 +53,49 @@ except ImportError:
 
 
 # =============================================================================
-# 設定 - 世界最強パラメータ
+# 💰 設定 - PROFIT MAXIMIZER パラメータ
 # =============================================================================
 
-TRADING_FEE = 0.0015
+TRADING_FEE = 0.0015  # 片道0.15%、往復0.3%
 
-# 動的調整される基本パラメータ
-BASE_TAKE_PROFIT = 0.006     # 0.6%
-BASE_STOP_LOSS = 0.004       # 0.4%
-MIN_HOLD_TIME = 30           # 30秒
-TRADE_COOLDOWN = 20          # 20秒
-FAIL_COOLDOWN = 60           # 60秒
+# =============================================================================
+# 💰 損小利大パラメータ（これが利益の源泉）
+# =============================================================================
+#
+# 【重要】リスクリワード比 = 1:2.5
+# - 利確 1.5% - 手数料 0.3% = 純利益 +1.2%
+# - 損切 0.3% + 手数料 0.3% = 純損失 -0.6%
+# - 必要勝率: 33%以上で黒字（現実的に達成可能）
+#
+BASE_TAKE_PROFIT = 0.015     # 1.5%で利確（大きく取る）
+BASE_STOP_LOSS = 0.003       # 0.3%で損切り（早く切る）
+TRAILING_STOP = 0.004        # 0.4%のトレーリングストップ
+MIN_HOLD_TIME = 60           # 最低60秒保持（利益を伸ばす）
+MAX_HOLD_TIME = 1800         # 最大30分（塩漬け防止）
+
+# =============================================================================
+# 💰 取引頻度制限（オーバートレード防止）
+# =============================================================================
+TRADE_COOLDOWN = 120         # 2分間クールダウン（頻繁な取引を防ぐ）
+FAIL_COOLDOWN = 180          # 失敗後3分待機
+MAX_TRADES_PER_HOUR = 10     # 1時間あたり最大10取引
 
 # API設定
-PRICE_DELAY = 1.0
-LOOP_DELAY = 2
-STATUS_INTERVAL = 15
+PRICE_DELAY = 1.5
+LOOP_DELAY = 3
+STATUS_INTERVAL = 20
 
-# AI信頼度閾値
-AI_CONFIDENCE_THRESHOLD = 0.4
-ML_WEIGHT = 0.3              # ML予測の重み
-TECH_WEIGHT = 0.7            # テクニカル指標の重み
+# =============================================================================
+# 💰 高精度シグナル設定（勝率向上）
+# =============================================================================
+AI_CONFIDENCE_THRESHOLD = 0.65   # 65%以上の確信度のみ取引
+ML_WEIGHT = 0.25                 # ML予測の重み
+TECH_WEIGHT = 0.75               # テクニカル指標の重み（実績重視）
+TREND_WEIGHT = 0.30              # トレンド方向の重み（順張り重視）
+
+# トレンドフィルター
+REQUIRE_TREND_ALIGNMENT = True   # トレンド方向との一致を必須に
+MIN_TREND_STRENGTH = 0.3         # 最低トレンド強度
 
 # =============================================================================
 # 🛡️ BULLETPROOF ORDER SYSTEM - 絶対安全設定
@@ -635,19 +658,58 @@ class UltimateTrader:
         return True
 
     def should_buy(self, pair: str, price: float) -> Tuple[bool, float, str]:
-        """買い判断"""
+        """
+        💰 PROFIT MAXIMIZER買い判断
+        - 高確信度シグナルのみ（65%以上）
+        - トレンド方向と一致必須
+        - オーバートレード防止
+        """
         if not self.can_trade(pair):
+            return False, 0.0, ""
+
+        # オーバートレード防止（1時間あたり最大取引数）
+        recent_trades = sum(
+            1 for t in self.trade_history
+            if (datetime.now() - t.timestamp).seconds < 3600
+        )
+        if recent_trades >= MAX_TRADES_PER_HOUR:
             return False, 0.0, ""
 
         signal, confidence, reason = self.analyze(pair, price)
 
-        if signal == "BUY" and confidence >= AI_CONFIDENCE_THRESHOLD:
-            return True, confidence, reason
+        if signal != "BUY" or confidence < AI_CONFIDENCE_THRESHOLD:
+            return False, 0.0, ""
 
-        return False, 0.0, ""
+        # === トレンドフィルター ===
+        if REQUIRE_TREND_ALIGNMENT:
+            market_state = self.market_intel.get_market_state()
+
+            # 下落トレンド時は買わない
+            if market_state.trend_direction in ["DOWN", "STRONG_DOWN"]:
+                return False, 0.0, ""
+
+            # 極度の恐怖時も買わない（パニック売りに巻き込まれる）
+            if market_state.sentiment == "EXTREME_FEAR":
+                return False, 0.0, ""
+
+            # ボラティリティが極端に高い時は買わない
+            if market_state.volatility_regime == "EXTREME":
+                return False, 0.0, ""
+
+            # トレンド方向と一致で信頼度ボーナス
+            if market_state.trend_direction in ["UP", "STRONG_UP"]:
+                confidence = min(confidence * 1.1, 1.0)
+                reason += " トレンド↑"
+
+        return True, confidence, reason
 
     def should_sell(self, pair: str, price: float) -> Tuple[bool, str]:
-        """売り判断"""
+        """
+        💰 PROFIT MAXIMIZER売り判断
+        - 損は早く切る（0.3%）
+        - 利益は大きく伸ばす（1.5%以上）
+        - トレーリングストップで利益保護
+        """
         pos = self.positions.get(pair)
         if not pos:
             return False, ""
@@ -662,37 +724,63 @@ class UltimateTrader:
         if price < pos.lowest:
             pos.lowest = price
 
-        # === 損切り判断 ===
+        # ==========================================
+        # 💰 損切りルール（早く切る = 損失最小化）
+        # ==========================================
 
-        # 緊急損切り (-2%)
-        if pnl <= -0.02:
-            return True, f"緊急損切り {pnl*100:.2f}%"
+        # 緊急損切り (-1.5%) - 絶対防衛ライン
+        if pnl <= -0.015:
+            return True, f"🚨緊急損切り {pnl*100:.2f}%"
 
-        # 通常損切り
-        if hold_time >= MIN_HOLD_TIME and pnl <= -stop_loss:
-            return True, f"損切り {pnl*100:.2f}%"
+        # 即時損切り（MIN_HOLD_TIME待たない）- 損は早く切る
+        if pnl <= -stop_loss:
+            return True, f"⚡損切り {pnl*100:.2f}%"
 
-        # === 利確判断 ===
+        # 塩漬け防止（30分以上保持で微損でも切る）
+        if hold_time >= MAX_HOLD_TIME and pnl < 0.005:
+            return True, f"⏰タイムアウト {pnl*100:.2f}%"
 
-        # 急騰利確 (+1%以上、即時)
-        if pnl >= 0.01:
-            return True, f"急騰利確 +{pnl*100:.2f}%"
+        # ==========================================
+        # 💰 利確ルール（利益を伸ばす）
+        # ==========================================
 
-        # 通常利確
+        # 大勝利確定 (+2.5%以上) - 確実に取る
+        if pnl >= 0.025:
+            return True, f"🎉大勝利確 +{pnl*100:.2f}%"
+
+        # 通常利確（MIN_HOLD_TIME後）
         if hold_time >= MIN_HOLD_TIME and pnl >= take_profit:
-            return True, f"利確 +{pnl*100:.2f}%"
+            return True, f"💰利確 +{pnl*100:.2f}%"
 
-        # トレーリングストップ
-        if pos.highest > 0 and pnl > 0.003:
-            drop = (pos.highest - price) / pos.highest
-            if drop > 0.003:
-                return True, f"トレール +{pnl*100:.2f}%"
+        # ==========================================
+        # 💰 トレーリングストップ（利益保護）
+        # ==========================================
 
-        # AI売りシグナル
-        if hold_time >= MIN_HOLD_TIME:
+        # 高値から0.4%以上下落したら利確（利益が出ている場合のみ）
+        if pos.highest > pos.entry_price:
+            # 最高値からの下落率
+            drop_from_high = (pos.highest - price) / pos.highest
+
+            # 現在の含み益
+            profit_from_entry = (pos.highest - pos.entry_price) / pos.entry_price
+
+            # 含み益が0.8%以上あり、0.4%以上下落したら利確
+            if profit_from_entry >= 0.008 and drop_from_high >= TRAILING_STOP:
+                return True, f"📈トレール +{pnl*100:.2f}% (高値から-{drop_from_high*100:.1f}%)"
+
+            # 含み益が1.2%以上あり、0.3%以上下落したら利確（より敏感）
+            if profit_from_entry >= 0.012 and drop_from_high >= 0.003:
+                return True, f"📈トレール +{pnl*100:.2f}%"
+
+        # ==========================================
+        # 💰 AI売りシグナル（確信度高い場合のみ）
+        # ==========================================
+
+        if hold_time >= MIN_HOLD_TIME and pnl > 0.003:
             signal, confidence, reason = self.analyze(pair, price)
-            if signal == "SELL" and confidence > 0.5 and pnl > 0.002:
-                return True, f"AI売り {reason}"
+            # 70%以上の確信度で売りシグナル
+            if signal == "SELL" and confidence >= 0.70:
+                return True, f"🤖AI売り {reason}"
 
         return False, ""
 
@@ -1014,12 +1102,14 @@ class UltimateTrader:
 
         logger.info("")
         logger.info("╔══════════════════════════════════════════════════════════════╗")
-        logger.info("║  🏆 ULTIMATE AI TRADER v12.0 - 世界最強・絶対無敗トレーダー ║")
+        logger.info("║  🏆 ULTIMATE AI TRADER v13.0 - 世界最強・高利益トレーダー   ║")
         logger.info("╠══════════════════════════════════════════════════════════════╣")
-        logger.info("║  🛡️ BULLETPROOF ORDER SYSTEM - Insufficient funds 完全防止  ║")
+        logger.info("║  💰 PROFIT MAXIMIZER - 損小利大(RR比1:2.5) トレンドフォロー ║")
+        logger.info("║  🛡️ BULLETPROOF ORDER - 残高不足エラー完全防止              ║")
         logger.info("║  🧠 MARKET INTELLIGENCE - 相関/ボラ適応/時間帯/感情分析     ║")
-        logger.info("║  MACD | ボリンジャー | RSI | 複数時間足 | LSTM | LINE通知   ║")
         logger.info("╚══════════════════════════════════════════════════════════════╝")
+        logger.info("")
+        logger.info("  💰 利確: 1.5% | 損切: 0.3% | 必要勝率: 33%")
 
         active_pairs = []
 
